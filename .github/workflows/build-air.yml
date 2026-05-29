@@ -19,6 +19,12 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Install 32-bit libraries for AAPT
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y libc6:i386 libstdc++6:i386 zlib1g:i386
+
       - name: Setup AIR SDK
         uses: joshtynjala/setup-adobe-air-action@v2
         with:

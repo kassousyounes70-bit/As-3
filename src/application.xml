@@ -12,9 +12,6 @@
         <aspectRatio>landscape</aspectRatio>
         <renderMode>direct</renderMode>
     </initialWindow>
-    <icon>
-        <image192x192>icons/icon.png</image192x192>
-    </icon>
     <android>
         <manifestAdditions><![CDATA[
             <manifest android:installLocation="auto">

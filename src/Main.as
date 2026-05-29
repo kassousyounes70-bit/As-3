@@ -14,6 +14,7 @@ package {
     import flash.system.LoaderContext;
     import flash.text.TextField;
     import flash.text.TextFormat;
+    import flash.text.TextFormatAlign;
     import flash.utils.ByteArray;
 
     public class Main extends Sprite {
@@ -27,23 +28,39 @@ package {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             
             graphics.beginFill(0x1A1A1A);
-            graphics.drawRect(0, 0, 2000, 2000);
+            graphics.drawRect(0, 0, 2500, 2500);
             graphics.endFill();
 
             statusText = new TextField();
-            statusText.defaultTextFormat = new TextFormat("_sans", 32, 0xFFFFFF);
-            statusText.width = 900;
-            statusText.height = 200;
-            statusText.x = 50;
-            statusText.y = 250;
+            var textFormat:TextFormat = new TextFormat("_sans", 24, 0x00FF00);
+            statusText.defaultTextFormat = textFormat;
+            statusText.width = stage.stageWidth - 40;
+            statusText.height = stage.stageHeight - 200;
+            statusText.x = 20;
+            statusText.y = 180;
+            statusText.multiline = true;
+            statusText.wordWrap = true;
+            statusText.text = "System Ready. Waiting for file...";
             addChild(statusText);
 
             browseButton = new Sprite();
             browseButton.graphics.beginFill(0x007ACC);
-            browseButton.graphics.drawRect(0, 0, 400, 120);
+            browseButton.graphics.drawRect(0, 0, 300, 80);
             browseButton.graphics.endFill();
-            browseButton.x = 50;
-            browseButton.y = 80;
+            browseButton.x = (stage.stageWidth - 300) / 2;
+            browseButton.y = 50;
+            
+            var btnText:TextField = new TextField();
+            var btnFormat:TextFormat = new TextFormat("_sans", 28, 0xFFFFFF, true);
+            btnFormat.align = TextFormatAlign.CENTER;
+            btnText.defaultTextFormat = btnFormat;
+            btnText.text = "Select SWF File";
+            btnText.width = 300;
+            btnText.height = 40;
+            btnText.y = 20;
+            btnText.mouseEnabled = false;
+            browseButton.addChild(btnText);
+            
             addChild(browseButton);
 
             browseButton.addEventListener(MouseEvent.CLICK, onBrowseClick);
@@ -51,13 +68,21 @@ package {
         }
 
         private function onInvoke(e:InvokeEvent):void {
+            statusText.text = "Invoke triggered. Args length: " + e.arguments.length + "\n";
             if (e.arguments && e.arguments.length > 0) {
                 var filePath:String = e.arguments[0] as String;
-                if (filePath) {
+                statusText.appendText("Received path: " + filePath + "\n");
+                
+                try {
                     var sharedFile:File = new File(filePath);
                     if (sharedFile.exists) {
+                        statusText.appendText("File exists. Attempting injection...\n");
                         injectPayload(sharedFile);
+                    } else {
+                        statusText.appendText("Error: File does not exist at path.\n");
                     }
+                } catch (error:Error) {
+                    statusText.appendText("Path parsing error: " + error.message + "\n");
                 }
             }
         }
@@ -69,6 +94,7 @@ package {
         }
 
         private function onFileSelected(e:Event):void {
+            statusText.text = "Selected manually: " + fileToLoad.nativePath + "\n";
             injectPayload(fileToLoad);
         }
 
@@ -92,10 +118,11 @@ package {
                 context.allowCodeImport = true;
                 
                 gameLoader.loadBytes(fileData, context);
-                statusText.text = "";
+                
                 browseButton.visible = false;
+                statusText.visible = false;
             } catch (error:Error) {
-                statusText.text = error.message;
+                statusText.appendText("Injection Error: " + error.message + "\n");
             }
         }
     }

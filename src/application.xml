@@ -19,7 +19,7 @@
                 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
                 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
                 <application>
-                    <activity android:name=".AppEntry">
+                    <activity android:name=".AppEntry" android:exported="true">
                         <intent-filter>
                             <action android:name="android.intent.action.SEND" />
                             <category android:name="android.intent.category.DEFAULT" />

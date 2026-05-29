@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<application xmlns="http://ns.adobe.com/air/application/50.2">
+    <id>com.ncore.shopempire</id>
+    <versionNumber>1.0.0</versionNumber>
+    <filename>ShopEmpire</filename>
+    <name>Shop Empire</name>
+    <initialWindow>
+        <content>main.swf</content>
+        <visible>true</visible>
+        <fullScreen>true</fullScreen>
+        <autoOrients>true</autoOrients>
+        <aspectRatio>landscape</aspectRatio>
+        <renderMode>direct</renderMode>
+    </initialWindow>
+    <icon>
+        <image192x192>icons/icon.png</image192x192>
+    </icon>
+    <android>
+        <manifestAdditions><![CDATA[
+            <manifest android:installLocation="auto">
+                <uses-permission android:name="android.permission.INTERNET"/>
+            </manifest>
+        ]]></manifestAdditions>
+    </android>
+</application>

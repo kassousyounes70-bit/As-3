@@ -1,4 +1,4 @@
-name: Build AIR APK
+name: Build Nosta Player
 
 on:
   push:
@@ -25,15 +25,18 @@ jobs:
           air-version: "50.2"
           accept-license: true
 
+      - name: Compile ActionScript
+        run: amxmlc src/Main.as -output src/main.swf
+
       - name: Generate Certificate
         run: adt -certificate -validityPeriod 25 -cn NCore 2048-RSA cert.p12 password
 
       - name: Build APK
-        run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password ShopEmpire.apk src/application.xml -C src main.swf
+        run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostaPlayer.apk src/application.xml -C src main.swf
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ShopEmpire-Release
-          path: ShopEmpire.apk
+          name: NostaPlayer-Release
+          path: NostaPlayer.apk
           retention-days: 30

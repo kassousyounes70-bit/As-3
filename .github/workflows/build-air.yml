@@ -1,6 +1,8 @@
 name: Build AIR APK
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -37,4 +39,3 @@ jobs:
           name: ShopEmpire-Release
           path: ShopEmpire.apk
           retention-days: 30
-          

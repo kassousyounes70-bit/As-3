@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <application xmlns="http://ns.adobe.com/air/application/50.2">
-    <id>com.ncore.shopempire</id>
+    <id>com.nostagames.player</id>
     <versionNumber>1.0.0</versionNumber>
-    <filename>ShopEmpire</filename>
-    <name>Shop Empire</name>
+    <filename>NostaPlayer</filename>
+    <name>Nosta Flash Player</name>
     <initialWindow>
         <content>main.swf</content>
         <visible>true</visible>
@@ -16,6 +16,7 @@
         <manifestAdditions><![CDATA[
             <manifest android:installLocation="auto">
                 <uses-permission android:name="android.permission.INTERNET"/>
+                <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
             </manifest>
         ]]></manifestAdditions>
     </android>

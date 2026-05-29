@@ -29,7 +29,7 @@ jobs:
         run: adt -certificate -validityPeriod 25 -cn NCore 2048-RSA cert.p12 password
 
       - name: Build APK
-        run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password ShopEmpire.apk src/application.xml -C src main.swf icons
+        run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password ShopEmpire.apk src/application.xml -C src main.swf
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

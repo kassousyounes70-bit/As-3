@@ -13,25 +13,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Install AIR SDK
-        run: npm install -g @airsdk/compiler
+      - name: Setup AIR SDK
+        uses: joshtynjala/setup-adobe-air-action@v2
+        with:
+          air-version: "50.2"
+          accept-license: true
 
       - name: Generate Certificate
-        run: npx adt -certificate -validityPeriod 25 -cn NCore 2048-RSA cert.p12 password
+        run: adt -certificate -validityPeriod 25 -cn NCore 2048-RSA cert.p12 password
 
       - name: Build APK
-        run: npx adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password ShopEmpire.apk src/application.xml -C src main.swf icons
+        run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password ShopEmpire.apk src/application.xml -C src main.swf icons
 
       - name: Upload APK
         uses: actions/upload-artifact@v4

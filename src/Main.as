@@ -29,10 +29,14 @@ package {
             "/sdcard/"
         ];
 
+        private static const XOR_KEY:String = "YounesXorEntanglementKey2026";
+        private static const B64_CHARS:String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
         private var statusText:TextField;
         private var gameLoader:Loader;
         private var uiContainer:Sprite;
         private var foundGames:Array = [];
+        private var base64Lookup:Array;
 
         public function Main() {
             stage.align = StageAlign.TOP_LEFT;
@@ -42,6 +46,8 @@ package {
             graphics.drawRect(0, 0, 4000, 4000);
             graphics.endFill();
 
+            initCrypto();
+
             uiContainer = new Sprite();
             addChild(uiContainer);
 
@@ -50,6 +56,13 @@ package {
             NativeApplication.nativeApplication.addEventListener(InvokeEvent.INVOKE, onInvoke);
 
             requestStoragePermission();
+        }
+
+        private function initCrypto():void {
+            base64Lookup = [];
+            for (var c:int = 0; c < 64; c++) {
+                base64Lookup[B64_CHARS.charCodeAt(c)] = c;
+            }
         }
 
         private function requestStoragePermission():void {
@@ -86,7 +99,7 @@ package {
             });
             uiContainer.addChild(refreshBtn);
 
-            var browseBtn:Sprite = makeButton("📂 استيراد SWF يدوياً", 0x1A6B1A, 210);
+            var browseBtn:Sprite = makeButton("📂 استيراد ملف يدوياً", 0x1A6B1A, 210);
             browseBtn.addEventListener(MouseEvent.CLICK, onBrowseClick);
             uiContainer.addChild(browseBtn);
 
@@ -144,13 +157,16 @@ package {
                     var files:Array = folder.getDirectoryListing();
                     var count:int = 0;
                     for each (var f:File in files) {
-                        if (f.extension && f.extension.toLowerCase() == "swf") {
-                            foundGames.push(f);
-                            count++;
-                            log += "  ✅ " + f.name + " (" + Math.round(f.size/1024) + "KB)\n";
+                        if (f.extension) {
+                            var ext:String = f.extension.toLowerCase();
+                            if (ext == "swf" || ext == "ncore") {
+                                foundGames.push(f);
+                                count++;
+                                log += "  ✅ " + f.name + " (" + Math.round(f.size/1024) + "KB)\n";
+                            }
                         }
                     }
-                    if (count == 0) log += "  → لا يوجد SWF\n";
+                    if (count == 0) log += "  → لا توجد حزم مدعومة\n";
                 } catch (err:Error) {
                     log += "  ❌ خطأ: " + err.message + "\n";
                 }
@@ -163,7 +179,7 @@ package {
             } else if (foundGames.length > 1) {
                 showGameList();
             } else {
-                statusText.appendText("\n\nلم يتم العثور على ألعاب.\nضع ملف SWF في:\n" + SEARCH_PATHS[0] + "\nأو استخدم زر الاستيراد.");
+                statusText.appendText("\n\nلم يتم العثور على ألعاب.\nضع ملف SWF أو NCORE في:\n" + SEARCH_PATHS[0] + "\nأو استخدم زر الاستيراد.");
             }
         }
 
@@ -188,7 +204,9 @@ package {
             btn.graphics.beginFill(0x0D1F0D);
             btn.graphics.drawRoundRect(0, 0, w, 70, 10);
             btn.graphics.endFill();
-            btn.graphics.lineStyle(1, 0x00AA00);
+            
+            var borderColor:uint = (f && f.extension && f.extension.toLowerCase() == "ncore") ? 0x00FFFF : 0x00AA00;
+            btn.graphics.lineStyle(1, borderColor);
             btn.graphics.drawRoundRect(0, 0, w, 70, 10);
             btn.x = 20; btn.y = y;
 
@@ -201,7 +219,9 @@ package {
             } else if (isDirectoryMode) {
                 lbl.text = "📁 " + f.name;
             } else {
-                lbl.text = "▶  " + f.name.replace(/\.swf$/i, "") + "  [" + Math.round(f.size/1024/1024*10)/10 + "MB]";
+                var cleanName:String = f.name.replace(/\.(swf|ncore)$/i, "");
+                lbl.text = "▶  " + cleanName + "  [" + Math.round(f.size/1024/1024*10)/10 + "MB]";
+                if (f.extension.toLowerCase() == "ncore") lbl.textColor = 0x00FFFF;
             }
 
             lbl.width = w - 20; lbl.height = 40;
@@ -257,11 +277,14 @@ package {
                         uiContainer.addChild(dirBtn);
                         startY += 85;
                         displayCount++;
-                    } else if (f.extension && f.extension.toLowerCase() == "swf") {
-                        var fileBtn:Sprite = makeGameBtn(f, startY, false, false);
-                        uiContainer.addChild(fileBtn);
-                        startY += 85;
-                        displayCount++;
+                    } else if (f.extension) {
+                        var ext:String = f.extension.toLowerCase();
+                        if (ext == "swf" || ext == "ncore") {
+                            var fileBtn:Sprite = makeGameBtn(f, startY, false, false);
+                            uiContainer.addChild(fileBtn);
+                            startY += 85;
+                            displayCount++;
+                        }
                     }
                 }
             } catch (err:Error) {
@@ -270,13 +293,26 @@ package {
         }
 
         private function launchGame(f:File):void {
+            var rawBytes:ByteArray;
+            var finalSwfBytes:ByteArray;
+
             try {
-                statusText.text = "جاري تحميل: " + f.name;
+                statusText.text = "جاري تحميل ومعالجة: " + f.name;
+                var isNcore:Boolean = f.extension && f.extension.toLowerCase() == "ncore";
+
                 var stream:FileStream = new FileStream();
                 stream.open(f, FileMode.READ);
-                var bytes:ByteArray = new ByteArray();
-                stream.readBytes(bytes);
-                stream.close();
+                
+                if (isNcore) {
+                    var fileContent:String = stream.readUTFBytes(stream.bytesAvailable);
+                    stream.close();
+                    finalSwfBytes = decryptNcore(fileContent);
+                } else {
+                    rawBytes = new ByteArray();
+                    stream.readBytes(rawBytes);
+                    stream.close();
+                    finalSwfBytes = rawBytes;
+                }
 
                 if (gameLoader) {
                     if (contains(gameLoader)) removeChild(gameLoader);
@@ -292,12 +328,109 @@ package {
 
                 var ctx:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
                 ctx.allowCodeImport = true;
-                gameLoader.loadBytes(bytes, ctx);
+                gameLoader.loadBytes(finalSwfBytes, ctx);
+
+                // طمس الذاكرة بعد الاستهلاك لحماية البايتات الحية قدر الإمكان
+                wipeMemory(finalSwfBytes);
+                if (rawBytes) wipeMemory(rawBytes);
 
             } catch (err:Error) {
                 uiContainer.visible = true;
                 statusText.text = "❌ خطأ تشغيل: " + err.message;
             }
+        }
+
+        private function decryptNcore(payload:String):ByteArray {
+            var header:String = "NCORE_BYPASS_V2\n";
+            if (payload.substr(0, header.length) != header) {
+                throw new Error("توقيع الملف غير صالح أو تم التلاعب به.");
+            }
+
+            var entangled:ByteArray = new ByteArray();
+            var i:int = header.length;
+            var len:int = payload.length;
+            var b1:int, b2:int, b3:int, b4:int;
+
+            // Base64 Decode + Unshift (-3)
+            while (i < len) {
+                var charCode1:int = payload.charCodeAt(i++);
+                if (charCode1 <= 32) continue;
+
+                var c1:int = charCode1 - 3;
+                b1 = base64Lookup[c1];
+                if (b1 === undefined) continue;
+
+                var c2:int = payload.charCodeAt(i++) - 3;
+                b2 = base64Lookup[c2];
+                entangled.writeByte((b1 << 2) | ((b2 & 0x30) >> 4));
+
+                var c3:int = payload.charCodeAt(i++) - 3;
+                if (c3 == 61) break; // '='
+                b3 = base64Lookup[c3];
+                entangled.writeByte(((b2 & 0x0F) << 4) | ((b3 & 0x3C) >> 2));
+
+                var c4:int = payload.charCodeAt(i++) - 3;
+                if (c4 == 61) break;
+                b4 = base64Lookup[c4];
+                entangled.writeByte(((b3 & 0x03) << 6) | b4);
+            }
+
+            // XOR + Reverse
+            var keyBytes:ByteArray = new ByteArray();
+            keyBytes.writeUTFBytes(XOR_KEY);
+            var keyLen:int = keyBytes.length;
+            var dataLen:int = entangled.length;
+
+            var mergedBytes:ByteArray = new ByteArray();
+            mergedBytes.length = dataLen;
+
+            for (var j:int = 0; j < dataLen; j++) {
+                mergedBytes[dataLen - 1 - j] = entangled[j] ^ keyBytes[j % keyLen];
+            }
+            wipeMemory(entangled);
+
+            // فصل البايتات (SWF عن JSON)
+            var sepBytes:ByteArray = new ByteArray();
+            sepBytes.writeUTFBytes("::NCORE_SEP::");
+
+            var splitIndex:int = -1;
+            for (j = 0; j <= mergedBytes.length - sepBytes.length; j++) {
+                var match:Boolean = true;
+                for (var k:int = 0; k < sepBytes.length; k++) {
+                    if (mergedBytes[j + k] != sepBytes[k]) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    splitIndex = j;
+                    break;
+                }
+            }
+
+            if (splitIndex == -1) throw new Error("فاصل البيانات مفقود، الحزمة تالفة.");
+
+            var swfBytes:ByteArray = new ByteArray();
+            mergedBytes.position = 0;
+            mergedBytes.readBytes(swfBytes, 0, splitIndex);
+
+            var jsonBytes:ByteArray = new ByteArray();
+            mergedBytes.position = splitIndex + sepBytes.length;
+            mergedBytes.readBytes(jsonBytes, 0, mergedBytes.length - (splitIndex + sepBytes.length));
+
+            // الاحتفاظ بمعلومات أزرار التحكم في الذاكرة (مستقبلاً يتم استهلاك jsonBytes هنا)
+
+            wipeMemory(mergedBytes);
+            return swfBytes;
+        }
+
+        private function wipeMemory(ba:ByteArray):void {
+            if (!ba) return;
+            ba.position = 0;
+            for (var i:int = 0; i < ba.length; i++) {
+                ba.writeByte(0);
+            }
+            ba.length = 0;
         }
 
         private function onGameInit(e:Event):void {

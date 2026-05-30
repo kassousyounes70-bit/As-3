@@ -22,6 +22,7 @@ package {
     public class Main extends Sprite {
 
         private static const SEARCH_PATHS:Array = [
+            "/sdcard/NostaGames/",
             "/sdcard/Android/data/com.ncore.nostagames/files/flash_games/",
             File.applicationStorageDirectory.nativePath + "/flash_games/",
             "/sdcard/Download/",
@@ -285,6 +286,7 @@ package {
 
                 uiContainer.visible = false;
                 gameLoader = new Loader();
+                gameLoader.contentLoaderInfo.addEventListener(Event.INIT, onGameInit);
                 gameLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onError);
                 addChild(gameLoader);
 
@@ -296,6 +298,22 @@ package {
                 uiContainer.visible = true;
                 statusText.text = "❌ خطأ تشغيل: " + err.message;
             }
+        }
+
+        private function onGameInit(e:Event):void {
+            try {
+                var swfW:Number = gameLoader.contentLoaderInfo.width;
+                var swfH:Number = gameLoader.contentLoaderInfo.height;
+                var screenW:Number = stage.stageWidth || 1920;
+                var screenH:Number = stage.stageHeight || 1080;
+
+                var scale:Number = Math.min(screenW / swfW, screenH / swfH);
+
+                gameLoader.scaleX = scale;
+                gameLoader.scaleY = scale;
+                gameLoader.x = (screenW - (swfW * scale)) / 2;
+                gameLoader.y = (screenH - (swfH * scale)) / 2;
+            } catch (err:Error) {}
         }
 
         private function onError(e:IOErrorEvent):void {

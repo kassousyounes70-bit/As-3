@@ -19,7 +19,7 @@
                 <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
                 <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
                 <application>
-                    <activity android:name=".AppEntry">
+                    <activity android:name=".AppEntry" android:exported="true">
                         <intent-filter>
                             <action android:name="android.intent.action.SEND" />
                             <category android:name="android.intent.category.DEFAULT" />
@@ -34,8 +34,8 @@
                             <data android:scheme="file" />
                             <data android:scheme="content" />
                             <data android:mimeType="application/x-shockwave-flash" />
-                            <data android:mimeType="application/octet-stream" />
-                            <data android:mimeType="*/*" />
+                            <data android:pathPattern=".*\\.swf" />
+                            <data android:host="*" />
                         </intent-filter>
                     </activity>
                 </application>

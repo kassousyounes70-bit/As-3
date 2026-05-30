@@ -7,6 +7,8 @@ package {
     import flash.events.Event;
     import flash.events.InvokeEvent;
     import flash.events.MouseEvent;
+    import flash.events.TouchEvent;
+    import flash.events.KeyboardEvent;
     import flash.events.IOErrorEvent;
     import flash.events.PermissionEvent;
     import flash.filesystem.File;
@@ -18,6 +20,9 @@ package {
     import flash.text.TextFormat;
     import flash.text.TextFormatAlign;
     import flash.utils.ByteArray;
+    import flash.ui.Multitouch;
+    import flash.ui.MultitouchInputMode;
+    import flash.ui.Keyboard;
 
     public class Main extends Sprite {
 
@@ -32,15 +37,32 @@ package {
         private static const XOR_KEY:String = "YounesXorEntanglementKey2026";
         private static const B64_CHARS:String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+        private static const KEY_MAP:Object = {
+            "SPACE": Keyboard.SPACE,
+            "W": Keyboard.W,
+            "A": Keyboard.A,
+            "S": Keyboard.S,
+            "D": Keyboard.D,
+            "UP": Keyboard.UP,
+            "DOWN": Keyboard.DOWN,
+            "LEFT": Keyboard.LEFT,
+            "RIGHT": Keyboard.RIGHT,
+            "ENTER": Keyboard.ENTER
+        };
+
         private var statusText:TextField;
         private var gameLoader:Loader;
         private var uiContainer:Sprite;
+        private var gamepadLayer:Sprite;
         private var foundGames:Array = [];
         private var base64Lookup:Array;
+        private var currentControlsData:Object;
 
         public function Main() {
             stage.align = StageAlign.TOP_LEFT;
             stage.scaleMode = StageScaleMode.NO_SCALE;
+            
+            Multitouch.inputMode = MultitouchInputMode.TOUCH_POINT;
 
             graphics.beginFill(0x0A0A0A);
             graphics.drawRect(0, 0, 4000, 4000);
@@ -295,6 +317,12 @@ package {
         private function launchGame(f:File):void {
             var rawBytes:ByteArray;
             var finalSwfBytes:ByteArray;
+            currentControlsData = null;
+
+            if (gamepadLayer && contains(gamepadLayer)) {
+                removeChild(gamepadLayer);
+                gamepadLayer = null;
+            }
 
             try {
                 statusText.text = "جاري تحميل ومعالجة: " + f.name;
@@ -306,7 +334,16 @@ package {
                 if (isNcore) {
                     var fileContent:String = stream.readUTFBytes(stream.bytesAvailable);
                     stream.close();
-                    finalSwfBytes = decryptNcore(fileContent);
+                    
+                    var extracted:Object = decryptNcore(fileContent);
+                    finalSwfBytes = extracted.swf;
+                    
+                    if (extracted.json && extracted.json.length > 0) {
+                        var jsonString:String = extracted.json.readUTFBytes(extracted.json.length);
+                        currentControlsData = JSON.parse(jsonString);
+                    }
+                    wipeMemory(extracted.json);
+
                 } else {
                     rawBytes = new ByteArray();
                     stream.readBytes(rawBytes);
@@ -330,7 +367,6 @@ package {
                 ctx.allowCodeImport = true;
                 gameLoader.loadBytes(finalSwfBytes, ctx);
 
-                // طمس الذاكرة بعد الاستهلاك لحماية البايتات الحية قدر الإمكان
                 wipeMemory(finalSwfBytes);
                 if (rawBytes) wipeMemory(rawBytes);
 
@@ -340,7 +376,7 @@ package {
             }
         }
 
-        private function decryptNcore(payload:String):ByteArray {
+        private function decryptNcore(payload:String):Object {
             var header:String = "NCORE_BYPASS_V2\n";
             if (payload.substr(0, header.length) != header) {
                 throw new Error("توقيع الملف غير صالح أو تم التلاعب به.");
@@ -351,7 +387,6 @@ package {
             var len:int = payload.length;
             var b1:int, b2:int, b3:int, b4:int;
 
-            // Base64 Decode + Unshift (-3)
             while (i < len) {
                 var charCode1:int = payload.charCodeAt(i++);
                 if (charCode1 <= 32) continue;
@@ -365,7 +400,7 @@ package {
                 entangled.writeByte((b1 << 2) | ((b2 & 0x30) >> 4));
 
                 var c3:int = payload.charCodeAt(i++) - 3;
-                if (c3 == 61) break; // '='
+                if (c3 == 61) break;
                 b3 = base64Lookup[c3];
                 entangled.writeByte(((b2 & 0x0F) << 4) | ((b3 & 0x3C) >> 2));
 
@@ -375,7 +410,6 @@ package {
                 entangled.writeByte(((b3 & 0x03) << 6) | b4);
             }
 
-            // XOR + Reverse
             var keyBytes:ByteArray = new ByteArray();
             keyBytes.writeUTFBytes(XOR_KEY);
             var keyLen:int = keyBytes.length;
@@ -389,7 +423,6 @@ package {
             }
             wipeMemory(entangled);
 
-            // فصل البايتات (SWF عن JSON)
             var sepBytes:ByteArray = new ByteArray();
             sepBytes.writeUTFBytes("::NCORE_SEP::");
 
@@ -408,20 +441,22 @@ package {
                 }
             }
 
-            if (splitIndex == -1) throw new Error("فاصل البيانات مفقود، الحزمة تالفة.");
-
             var swfBytes:ByteArray = new ByteArray();
-            mergedBytes.position = 0;
-            mergedBytes.readBytes(swfBytes, 0, splitIndex);
-
             var jsonBytes:ByteArray = new ByteArray();
-            mergedBytes.position = splitIndex + sepBytes.length;
-            mergedBytes.readBytes(jsonBytes, 0, mergedBytes.length - (splitIndex + sepBytes.length));
 
-            // الاحتفاظ بمعلومات أزرار التحكم في الذاكرة (مستقبلاً يتم استهلاك jsonBytes هنا)
+            if (splitIndex == -1) {
+                mergedBytes.position = 0;
+                mergedBytes.readBytes(swfBytes, 0, mergedBytes.length);
+            } else {
+                mergedBytes.position = 0;
+                mergedBytes.readBytes(swfBytes, 0, splitIndex);
+
+                mergedBytes.position = splitIndex + sepBytes.length;
+                mergedBytes.readBytes(jsonBytes, 0, mergedBytes.length - (splitIndex + sepBytes.length));
+            }
 
             wipeMemory(mergedBytes);
-            return swfBytes;
+            return { swf: swfBytes, json: jsonBytes };
         }
 
         private function wipeMemory(ba:ByteArray):void {
@@ -446,7 +481,126 @@ package {
                 gameLoader.scaleY = scale;
                 gameLoader.x = (screenW - (swfW * scale)) / 2;
                 gameLoader.y = (screenH - (swfH * scale)) / 2;
+
+                if (currentControlsData) {
+                    buildVirtualGamepad(currentControlsData, screenW, screenH);
+                }
+
             } catch (err:Error) {}
+        }
+
+        private function buildVirtualGamepad(config:Object, screenW:Number, screenH:Number):void {
+            gamepadLayer = new Sprite();
+            addChild(gamepadLayer);
+
+            if (config.p1) {
+                for (var key:String in config.p1) {
+                    var btnData:Object = config.p1[key];
+                    var px:Number = (screenW * btnData.x) / 100;
+                    var py:Number = (screenH * btnData.y) / 100;
+                    var pSize:Number = (Math.min(screenW, screenH) * btnData.size) / 100;
+
+                    if (key.toUpperCase() == "JOYSTICK") {
+                        createVirtualJoystick(px, py, pSize, config.wasd);
+                    } else {
+                        var targetKey:uint = KEY_MAP[key.toUpperCase()] || 0;
+                        if (targetKey != 0) {
+                            createVirtualButton(key, targetKey, px, py, pSize);
+                        }
+                    }
+                }
+            }
+        }
+
+        private function createVirtualButton(label:String, keyCode:uint, xPos:Number, yPos:Number, sizePx:Number):void {
+            var btn:Sprite = new Sprite();
+            btn.graphics.beginFill(0xFFFFFF, 0.3);
+            btn.graphics.lineStyle(2, 0x00FF00, 0.8);
+            btn.graphics.drawCircle(0, 0, sizePx / 2);
+            btn.graphics.endFill();
+            
+            var t:TextField = new TextField();
+            var fmt:TextFormat = new TextFormat("_sans", sizePx * 0.3, 0xFFFFFF, true);
+            fmt.align = TextFormatAlign.CENTER;
+            t.defaultTextFormat = fmt;
+            t.text = label;
+            t.width = sizePx;
+            t.height = sizePx * 0.4;
+            t.x = -(sizePx / 2);
+            t.y = -(sizePx * 0.2);
+            t.mouseEnabled = false;
+            btn.addChild(t);
+
+            btn.x = xPos;
+            btn.y = yPos;
+            
+            btn.addEventListener(TouchEvent.TOUCH_BEGIN, function(e:TouchEvent):void {
+                btn.alpha = 0.5;
+                simulateKeyPress(keyCode, true);
+            });
+            
+            var onEnd:Function = function(e:TouchEvent):void {
+                btn.alpha = 1.0;
+                simulateKeyPress(keyCode, false);
+            };
+            btn.addEventListener(TouchEvent.TOUCH_END, onEnd);
+            btn.addEventListener(TouchEvent.TOUCH_OUT, onEnd);
+            
+            gamepadLayer.addChild(btn);
+        }
+
+        private function createVirtualJoystick(xPos:Number, yPos:Number, sizePx:Number, isWasd:Boolean):void {
+            var base:Sprite = new Sprite();
+            base.graphics.beginFill(0xFFFFFF, 0.1);
+            base.graphics.lineStyle(2, 0x00FFFF, 0.5);
+            base.graphics.drawCircle(0, 0, sizePx / 2);
+            base.graphics.endFill();
+            base.x = xPos;
+            base.y = yPos;
+            gamepadLayer.addChild(base);
+
+            var keyUp:uint = isWasd ? Keyboard.W : Keyboard.UP;
+            var keyDown:uint = isWasd ? Keyboard.S : Keyboard.DOWN;
+            var keyLeft:uint = isWasd ? Keyboard.A : Keyboard.LEFT;
+            var keyRight:uint = isWasd ? Keyboard.D : Keyboard.RIGHT;
+
+            var r:Number = sizePx / 4;
+            var offset:Number = (sizePx / 2) - r;
+            
+            createDirectionalPad(base, 0, -offset, r, keyUp);
+            createDirectionalPad(base, 0, offset, r, keyDown);
+            createDirectionalPad(base, -offset, 0, r, keyLeft);
+            createDirectionalPad(base, offset, 0, r, keyRight);
+        }
+
+        private function createDirectionalPad(parent:Sprite, lx:Number, ly:Number, r:Number, keyCode:uint):void {
+            var pad:Sprite = new Sprite();
+            pad.graphics.beginFill(0xFFFFFF, 0.2);
+            pad.graphics.drawCircle(0, 0, r);
+            pad.graphics.endFill();
+            pad.x = lx;
+            pad.y = ly;
+
+            pad.addEventListener(TouchEvent.TOUCH_BEGIN, function(e:TouchEvent):void {
+                pad.alpha = 0.6;
+                simulateKeyPress(keyCode, true);
+            });
+            var onEnd:Function = function(e:TouchEvent):void {
+                pad.alpha = 1.0;
+                simulateKeyPress(keyCode, false);
+            };
+            pad.addEventListener(TouchEvent.TOUCH_END, onEnd);
+            pad.addEventListener(TouchEvent.TOUCH_OUT, onEnd);
+
+            parent.addChild(pad);
+        }
+
+        private function simulateKeyPress(keyCode:uint, isDown:Boolean):void {
+            var ev:KeyboardEvent = new KeyboardEvent(
+                isDown ? KeyboardEvent.KEY_DOWN : KeyboardEvent.KEY_UP,
+                true, false, 0, keyCode
+            );
+            stage.dispatchEvent(ev);
         }
 
         private function onError(e:IOErrorEvent):void {

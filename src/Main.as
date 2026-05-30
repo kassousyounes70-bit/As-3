@@ -17,14 +17,15 @@ package {
     import flash.filesystem.FileMode;
     import flash.filesystem.FileStream;
     import flash.net.SharedObject;
+    import flash.net.SharedObjectFlushStatus;
     import flash.system.ApplicationDomain;
-    import flash.system.Security;
     import flash.system.LoaderContext;
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.text.TextFormatAlign;
     import flash.utils.ByteArray;
-    import flash.utils.setTimeout;
+    import flash.utils.Timer;
+    import flash.events.TimerEvent;
 
     public class Main extends Sprite {
 
@@ -36,26 +37,30 @@ package {
             "/sdcard/"
         ];
 
-        // ===== متغيرات واجهة المستخدم =====
+        // ===== UI =====
         private var statusText:TextField;
         private var gameLoader:Loader;
         private var uiContainer:Sprite;
         private var foundGames:Array = [];
 
-        // ===== نظام السجل =====
-        private var logLines:Array  = [];
+        // ===== LOG =====
+        private var logLines:Array = [];
         private var logFile:File;
 
-        // ===== أبعاد الشاشة =====
+        // ===== Stage =====
         private var SW:Number;
         private var SH:Number;
 
-        // ===== ملف SWF المعلّق =====
+        // ===== Invoke =====
         private var pendingSwfPath:String = null;
 
-        // ===== عداد محاولات تحديد الموضع =====
-        private var positionRetryCount:int = 0;
-        private static const MAX_POSITION_RETRIES:int = 30;
+        // ===== Position retry timer (Timer حقيقي بدلاً من setTimeout) =====
+        private var posTimer:Timer;
+        private var posRetryCount:int = 0;
+        private static const MAX_POS_RETRIES:int = 40; // 4 ثوانٍ
+
+        // ===== SharedObject Flush Timer =====
+        private var soFlushTimer:Timer;
 
         // ============================================================
         public function Main() {
@@ -76,14 +81,13 @@ package {
             SW = stage.stageWidth  > 0 ? stage.stageWidth  : 1920;
             SH = stage.stageHeight > 0 ? stage.stageHeight : 1080;
 
-            // رفع حد Local Shared Object إلى الحد الأقصى
-            unlimitedLocalStorage();
-
             logFile = new File("/sdcard/NostaGames/logs/nosta_player_log.txt");
             writeLog("=== Nosta Flash Player بدأ ===");
             writeLog("Stage: " + SW + "x" + SH);
 
-            // اصطياد أي خطأ غير متوقع من الألعاب
+            // تهيئة SharedObject بحجم كبير من البداية
+            initSharedObjectStorage();
+
             loaderInfo.uncaughtErrorEvents.addEventListener(
                 UncaughtErrorEvent.UNCAUGHT_ERROR, onUncaughtError
             );
@@ -98,32 +102,54 @@ package {
             buildUI();
 
             NativeApplication.nativeApplication.addEventListener(InvokeEvent.INVOKE, onInvoke);
-            NativeApplication.nativeApplication.addEventListener(Event.EXITING,      onExiting);
+            NativeApplication.nativeApplication.addEventListener(Event.EXITING, onExiting);
 
             requestStoragePermission();
         }
 
         // ============================================================
-        // LOCAL STORAGE — إصلاح مشكلة "set local storage to maximum"
+        // SHARED OBJECT — إصلاح مشكلة "set local storage to maximum"
+        // الحل الحقيقي: نطلب مساحة كبيرة مسبقاً لكل اسم لعبة محتملة
         // ============================================================
-        private function unlimitedLocalStorage():void {
-            try {
-                // منح الصلاحية الكاملة لـ SharedObject
-                SharedObject.defaultObjectEncoding = flash.net.ObjectEncoding.AMF3;
-                var so:SharedObject = SharedObject.getLocal("__nosta_init__");
-                so.flush(10 * 1024 * 1024); // طلب 10MB مبدئياً
-                writeLog("SharedObject flush OK");
-            } catch (e:Error) {
-                writeLog("SharedObject init error: " + e.message);
-            }
+        private function initSharedObjectStorage():void {
+            // قائمة بأسماء SharedObject التي تستخدمها ألعاب Shop Empire
+            var soNames:Array = [
+                "ShopEmpire", "shop_empire", "ShopEmpire2", "shopempire2",
+                "ShopEmpire3", "shop_empire_3", "SaveData", "GameSave",
+                "settings", "save", "data", "game", "__nosta__"
+            ];
 
-            // أيضاً رفع الـ quota عبر Security
-            try {
-                Security.allowDomain("*");
-                Security.allowInsecureDomain("*");
-            } catch (e:Error) {
-                writeLog("Security.allowDomain error: " + e.message);
+            var totalFlushed:int = 0;
+            for each (var name:String in soNames) {
+                try {
+                    var so:SharedObject = SharedObject.getLocal(name);
+                    // ضع بيانات وهمية لحجز المساحة
+                    so.data["_reserved"] = new Array(1024); // ~4KB لكل واحد
+                    var status:String = so.flush(5 * 1024 * 1024); // طلب 5MB لكل منها
+                    if (status == SharedObjectFlushStatus.FLUSHED) totalFlushed++;
+                } catch (e:Error) {
+                    writeLog("SO init error [" + name + "]: " + e.message);
+                }
             }
+            writeLog("SharedObject init: flushed " + totalFlushed + "/" + soNames.length);
+
+            // تشغيل timer يعيد flush كل 30 ثانية أثناء اللعب (يمنع التجمد عند الحفظ)
+            soFlushTimer = new Timer(30000);
+            soFlushTimer.addEventListener(TimerEvent.TIMER, onPeriodicFlush);
+            soFlushTimer.start();
+        }
+
+        private function onPeriodicFlush(e:TimerEvent):void {
+            if (!gameLoader || !gameLoader.content) return;
+            try {
+                // نحاول flush أي SharedObject مفتوح حالياً
+                var so:SharedObject = SharedObject.getLocal("ShopEmpire");
+                so.flush();
+                so = SharedObject.getLocal("ShopEmpire2");
+                so.flush();
+                so = SharedObject.getLocal("ShopEmpire3");
+                so.flush();
+            } catch (e:Error) {}
         }
 
         // ============================================================
@@ -247,7 +273,6 @@ package {
                     var folder:File = new File(path);
                     log += "\n• " + path + "\n";
                     if (!folder.exists) { log += "  → غير موجود\n"; continue; }
-
                     var files:Array = folder.getDirectoryListing();
                     var cnt:int = 0;
                     for each (var f:File in files) {
@@ -285,9 +310,8 @@ package {
             statusText.text = "تم العثور على " + foundGames.length + " لعبة — اختر:";
             var startY:Number = 320;
             var limit:int = Math.min(foundGames.length, 8);
-            for (var i:int = 0; i < limit; i++) {
+            for (var i:int = 0; i < limit; i++)
                 uiContainer.addChild(makeGameBtn(foundGames[i], startY + i * 85));
-            }
         }
 
         private function makeGameBtn(f:File, y:Number,
@@ -306,7 +330,7 @@ package {
             var fmt:TextFormat = new TextFormat("_sans", 20, 0x00FF00);
             lbl.defaultTextFormat = fmt;
 
-            if (isUp)         lbl.text = "📁 .. (العودة)";
+            if (isUp)           lbl.text = "📁 .. (العودة)";
             else if (isDirMode) lbl.text = "📁 " + f.name;
             else {
                 var mb:Number = Math.round(f.size/1024/1024*10)/10;
@@ -332,15 +356,13 @@ package {
             writeLog("onInvoke: args=" + e.arguments.length);
             if (e.arguments && e.arguments.length > 0) {
                 var raw:String = String(e.arguments[0]);
-                writeLog("onInvoke arg: " + raw);
                 var path:String = raw;
                 if (path.indexOf("file://") == 0)
                     path = decodeURIComponent(path.substring(7));
-
+                writeLog("onInvoke path: " + path);
                 try {
                     var f:File = new File(path);
                     if (f.exists) { launchGame(f); return; }
-                    else writeLog("onInvoke: file not found: " + path);
                 } catch (err:Error) {
                     writeLog("onInvoke ERR: " + err.message);
                 }
@@ -363,7 +385,6 @@ package {
                 var files:Array = dir.getDirectoryListing();
                 files.sortOn("name");
                 var y:Number = 320, cnt:int = 0;
-
                 if (dir.parent) {
                     uiContainer.addChild(makeGameBtn(dir.parent, y, false, true));
                     y += 85; cnt++;
@@ -390,6 +411,9 @@ package {
         private function launchGame(f:File):void {
             writeLog("=== launchGame: " + f.name + " (" + f.size + " bytes) ===");
 
+            // إيقاف أي timer موضع قديم
+            stopPosTimer();
+
             try {
                 var stream:FileStream = new FileStream();
                 stream.open(f, FileMode.READ);
@@ -404,23 +428,18 @@ package {
                 writeLog("SWF sig: " + sig);
 
                 if (sig != "CWS" && sig != "FWS" && sig != "ZWS") {
-                    writeLog("❌ ليس SWF صالح: " + sig);
                     showError("الملف ليس SWF صالح\nالتوقيع: " + sig);
                     return;
                 }
 
-                // قراءة حجم SWF الداخلي من الـ header
-                bytes.position = 4;
-                var swfInternalSize:uint = bytes.readUnsignedInt();
-                writeLog("SWF internal size: " + swfInternalSize);
-
                 destroyLoader();
-                positionRetryCount = 0;
+
+                posRetryCount = 0;
                 uiContainer.visible = false;
 
                 gameLoader = new Loader();
 
-                // اصطياد أخطاء اللعبة نفسها — نستمر ولا نوقف
+                // اصطياد أخطاء اللعبة — نسجّل ونستمر
                 gameLoader.uncaughtErrorEvents.addEventListener(
                     UncaughtErrorEvent.UNCAUGHT_ERROR, onGameUncaughtError
                 );
@@ -429,9 +448,10 @@ package {
                 gameLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onLoadError);
                 gameLoader.contentLoaderInfo.addEventListener(ErrorEvent.ERROR,      onLoadError);
 
-                // وضع الـ loader خلف الـ uiContainer
+                // تأكد من الترتيب: خلفية(0) → لعبة(1) → واجهة(2+)
                 addChildAt(gameLoader, 0);
 
+                // LoaderContext مع ApplicationDomain جديد كلياً
                 var ctx:LoaderContext = new LoaderContext(false, new ApplicationDomain(null));
                 ctx.allowCodeImport = true;
 
@@ -451,36 +471,66 @@ package {
         private function onGameInit(e:Event):void {
             var info:* = gameLoader.contentLoaderInfo;
             writeLog("onGameInit: " + info.width + "x" + info.height +
-                     " | frameRate=" + info.frameRate);
-            positionGame();
+                     " frameRate=" + info.frameRate);
+            startPosTimer();
         }
 
         private function onGameComplete(e:Event):void {
             writeLog("onGameComplete ✓");
+            stopPosTimer();
             positionGame();
         }
 
         // ============================================================
-        // POSITION GAME — مع retry للألعاب التي تأخذ وقتاً
+        // POSITION TIMER — Timer حقيقي بدلاً من setTimeout (يمكن إيقافه)
+        // ============================================================
+        private function startPosTimer():void {
+            stopPosTimer();
+            posRetryCount = 0;
+            posTimer = new Timer(100, MAX_POS_RETRIES);
+            posTimer.addEventListener(TimerEvent.TIMER, onPosTimerTick);
+            posTimer.addEventListener(TimerEvent.TIMER_COMPLETE, onPosTimerDone);
+            posTimer.start();
+        }
+
+        private function stopPosTimer():void {
+            if (posTimer) {
+                posTimer.stop();
+                posTimer.removeEventListener(TimerEvent.TIMER, onPosTimerTick);
+                posTimer.removeEventListener(TimerEvent.TIMER_COMPLETE, onPosTimerDone);
+                posTimer = null;
+            }
+        }
+
+        private function onPosTimerTick(e:TimerEvent):void {
+            if (!gameLoader) { stopPosTimer(); return; }
+            var info:* = gameLoader.contentLoaderInfo;
+            if (info.width > 0 && info.height > 0) {
+                stopPosTimer();
+                positionGame();
+            }
+        }
+
+        private function onPosTimerDone(e:TimerEvent):void {
+            stopPosTimer();
+            writeLog("posTimer: انتهت المحاولات، استخدام fallback size");
+            positionGame();
+        }
+
+        // ============================================================
+        // POSITION GAME
         // ============================================================
         private function positionGame():void {
+            // التحقق الدقيق — لا نستدعي getChildIndex إلا إذا تأكدنا
             if (!gameLoader) return;
-
-            var info:*      = gameLoader.contentLoaderInfo;
-            var swfW:Number = info.width;
-            var swfH:Number = info.height;
-
-            // إذا كانت الأبعاد صفر، ننتظر وإعادة المحاولة
-            if ((swfW <= 0 || swfH <= 0) && positionRetryCount < MAX_POSITION_RETRIES) {
-                positionRetryCount++;
-                writeLog("positionGame: أبعاد صفر، محاولة " + positionRetryCount);
-                setTimeout(positionGame, 100);
+            if (!gameLoader.stage) {
+                writeLog("positionGame: loader غير موجود في stage بعد");
                 return;
             }
 
-            // fallback للألعاب التي لا تُعلن عن حجمها
-            if (swfW <= 0) swfW = 550;
-            if (swfH <= 0) swfH = 400;
+            var info:*      = gameLoader.contentLoaderInfo;
+            var swfW:Number = info.width  > 0 ? info.width  : 550;
+            var swfH:Number = info.height > 0 ? info.height : 400;
 
             var scrW:Number = stage.stageWidth  > 0 ? stage.stageWidth  : SW;
             var scrH:Number = stage.stageHeight > 0 ? stage.stageHeight : SH;
@@ -496,44 +546,40 @@ package {
                      " scale=" + scale.toFixed(3) +
                      " pos=(" + gameLoader.x + "," + gameLoader.y + ")");
 
-            // ضمان ترتيب الطبقات: خلفية(0) → لعبة(1) → واجهة(2)
-            if (contains(gameLoader)) {
-                var idx:int = getChildIndex(gameLoader);
-                if (idx != 1) setChildIndex(gameLoader, 1);
+            // ضبط الترتيب بأمان
+            try {
+                if (contains(gameLoader) && getChildIndex(gameLoader) != 1) {
+                    setChildIndex(gameLoader, 1);
+                }
+            } catch (e:Error) {
+                writeLog("setChildIndex err: " + e.message);
             }
         }
 
         // ============================================================
-        // خطأ من داخل اللعبة — نسجّله ونستمر
+        // خطأ من داخل اللعبة — نسجّل ونستمر بدون إيقاف
         // ============================================================
         private function onGameUncaughtError(e:UncaughtErrorEvent):void {
+            var errID:int = 0;
             var msg:String = "";
+
             if (e.error is Error) {
                 var err:Error = e.error as Error;
-                msg = "Error #" + err.errorID + ": " + err.message;
-                var stack:String = err.getStackTrace();
-                if (stack) msg += "\n" + stack;
+                errID = err.errorID;
+                msg   = "Error #" + errID + ": " + err.message;
             } else if (e.error is ErrorEvent) {
                 msg = (e.error as ErrorEvent).text;
             } else {
                 msg = String(e.error);
             }
 
-            writeLog("⚠ GameError (ignored): " + msg);
-
-            // لا نوقف التطبيق — اللعبة ستستمر
-            e.preventDefault();
-
-            // إذا كانت شاشة سوداء بعد 2 ثانية، نحاول إعادة تحديد الموضع
-            setTimeout(function():void {
-                if (gameLoader && !uiContainer.visible) positionGame();
-            }, 2000);
+            writeLog("⚠ GameErr: " + msg);
+            e.preventDefault(); // لا نوقف اللعبة
         }
 
         private function onLoadError(e:*):void {
             var msg:String = (e is IOErrorEvent)
-                ? (e as IOErrorEvent).text
-                : String(e);
+                ? (e as IOErrorEvent).text : String(e);
             writeLog("❌ onLoadError: " + msg);
             showError("فشل تحميل اللعبة:\n" + msg);
             destroyLoader();
@@ -543,7 +589,7 @@ package {
             var msg:String = (e.error is Error)
                 ? (e.error as Error).getStackTrace()
                 : String(e.error);
-            writeLog("!!! AppUncaughtError: " + msg);
+            writeLog("!!! AppErr: " + msg);
             e.preventDefault();
         }
 
@@ -553,10 +599,11 @@ package {
         private function showError(msg:String):void {
             uiContainer.visible = true;
             statusText.text = "❌ " + msg +
-                "\n\n📋 السجل الكامل في:\n/sdcard/NostaGames/logs/nosta_player_log.txt";
+                "\n\n📋 السجل في:\n/sdcard/NostaGames/logs/nosta_player_log.txt";
         }
 
         private function destroyLoader():void {
+            stopPosTimer();
             if (!gameLoader) return;
             try {
                 gameLoader.uncaughtErrorEvents.removeEventListener(
@@ -577,7 +624,8 @@ package {
         // EXIT
         // ============================================================
         private function onExiting(e:Event):void {
-            writeLog("=== التطبيق يُغلق ===");
+            writeLog("=== يُغلق ===");
+            if (soFlushTimer) { soFlushTimer.stop(); soFlushTimer = null; }
             flushLogToFile();
             copyLogToClipboard();
         }
@@ -588,8 +636,7 @@ package {
         private function writeLog(msg:String):void {
             var now:Date = new Date();
             var ts:String = now.getHours() + ":" +
-                pad2(now.getMinutes()) + ":" +
-                pad2(now.getSeconds());
+                pad2(now.getMinutes()) + ":" + pad2(now.getSeconds());
             logLines.push("[" + ts + "] " + msg);
             if (logLines.length % 10 == 0) flushLogToFile();
         }

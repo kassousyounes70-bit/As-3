@@ -8,10 +8,10 @@ package {
     import flash.events.InvokeEvent;
     import flash.events.MouseEvent;
     import flash.events.IOErrorEvent;
+    import flash.events.PermissionEvent;
     import flash.filesystem.File;
     import flash.filesystem.FileMode;
     import flash.filesystem.FileStream;
-    import flash.net.FileFilter;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
     import flash.text.TextField;
@@ -48,6 +48,20 @@ package {
 
             NativeApplication.nativeApplication.addEventListener(InvokeEvent.INVOKE, onInvoke);
 
+            requestStoragePermission();
+        }
+
+        private function requestStoragePermission():void {
+            try {
+                var dummy:File = File.documentsDirectory;
+                dummy.addEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
+                dummy.requestPermission();
+            } catch (err:Error) {
+                searchAllPaths();
+            }
+        }
+
+        private function onPermissionResult(e:PermissionEvent):void {
             searchAllPaths();
         }
 

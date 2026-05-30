@@ -16,13 +16,15 @@ package {
     import flash.filesystem.File;
     import flash.filesystem.FileMode;
     import flash.filesystem.FileStream;
-    import flash.net.URLRequest;
+    import flash.net.SharedObject;
     import flash.system.ApplicationDomain;
+    import flash.system.Security;
     import flash.system.LoaderContext;
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.text.TextFormatAlign;
     import flash.utils.ByteArray;
+    import flash.utils.setTimeout;
 
     public class Main extends Sprite {
 
@@ -30,7 +32,6 @@ package {
         private static const SEARCH_PATHS:Array = [
             "/sdcard/NostaGames/",
             "/sdcard/Android/data/com.ncore.nostagames/files/flash_games/",
-            File.applicationStorageDirectory.nativePath + "/flash_games/",
             "/sdcard/Download/",
             "/sdcard/"
         ];
@@ -42,24 +43,24 @@ package {
         private var foundGames:Array = [];
 
         // ===== نظام السجل =====
-        private var logLines:Array = [];
+        private var logLines:Array  = [];
         private var logFile:File;
 
         // ===== أبعاد الشاشة =====
         private var SW:Number;
         private var SH:Number;
 
-        // ===== ملف SWF المطلوب تشغيله من invoke =====
+        // ===== ملف SWF المعلّق =====
         private var pendingSwfPath:String = null;
+
+        // ===== عداد محاولات تحديد الموضع =====
+        private var positionRetryCount:int = 0;
+        private static const MAX_POSITION_RETRIES:int = 30;
 
         // ============================================================
         public function Main() {
-            // تأجيل حتى يكون stage جاهزاً بالكامل
-            if (stage) {
-                init();
-            } else {
-                addEventListener(Event.ADDED_TO_STAGE, onAddedToStage);
-            }
+            if (stage) init();
+            else addEventListener(Event.ADDED_TO_STAGE, onAddedToStage);
         }
 
         private function onAddedToStage(e:Event):void {
@@ -68,7 +69,6 @@ package {
         }
 
         private function init():void {
-            // ===== إعداد Stage =====
             stage.align     = StageAlign.TOP_LEFT;
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.addEventListener(Event.RESIZE, onStageResize);
@@ -76,45 +76,64 @@ package {
             SW = stage.stageWidth  > 0 ? stage.stageWidth  : 1920;
             SH = stage.stageHeight > 0 ? stage.stageHeight : 1080;
 
-            // ===== إعداد السجل =====
+            // رفع حد Local Shared Object إلى الحد الأقصى
+            unlimitedLocalStorage();
+
             logFile = new File("/sdcard/NostaGames/logs/nosta_player_log.txt");
-            writeLog("=== Nosta Flash Player بدأ التشغيل ===");
+            writeLog("=== Nosta Flash Player بدأ ===");
             writeLog("Stage: " + SW + "x" + SH);
 
-            // ===== اصطياد الأخطاء غير المتوقعة =====
+            // اصطياد أي خطأ غير متوقع من الألعاب
             loaderInfo.uncaughtErrorEvents.addEventListener(
                 UncaughtErrorEvent.UNCAUGHT_ERROR, onUncaughtError
             );
 
-            // ===== خلفية سوداء =====
+            // خلفية
             graphics.beginFill(0x0A0A0A);
             graphics.drawRect(0, 0, 4000, 4000);
             graphics.endFill();
 
-            // ===== بناء الواجهة =====
             uiContainer = new Sprite();
             addChild(uiContainer);
             buildUI();
 
-            // ===== الاستماع للـ Invoke وزر الخروج =====
             NativeApplication.nativeApplication.addEventListener(InvokeEvent.INVOKE, onInvoke);
-            NativeApplication.nativeApplication.addEventListener(Event.EXITING, onExiting);
+            NativeApplication.nativeApplication.addEventListener(Event.EXITING,      onExiting);
 
-            // ===== طلب صلاحيات التخزين =====
             requestStoragePermission();
+        }
+
+        // ============================================================
+        // LOCAL STORAGE — إصلاح مشكلة "set local storage to maximum"
+        // ============================================================
+        private function unlimitedLocalStorage():void {
+            try {
+                // منح الصلاحية الكاملة لـ SharedObject
+                SharedObject.defaultObjectEncoding = flash.net.ObjectEncoding.AMF3;
+                var so:SharedObject = SharedObject.getLocal("__nosta_init__");
+                so.flush(10 * 1024 * 1024); // طلب 10MB مبدئياً
+                writeLog("SharedObject flush OK");
+            } catch (e:Error) {
+                writeLog("SharedObject init error: " + e.message);
+            }
+
+            // أيضاً رفع الـ quota عبر Security
+            try {
+                Security.allowDomain("*");
+                Security.allowInsecureDomain("*");
+            } catch (e:Error) {
+                writeLog("Security.allowDomain error: " + e.message);
+            }
         }
 
         // ============================================================
         // STAGE RESIZE
         // ============================================================
         private function onStageResize(e:Event):void {
-            if (stage.stageWidth > 0)  SW = stage.stageWidth;
+            if (stage.stageWidth  > 0) SW = stage.stageWidth;
             if (stage.stageHeight > 0) SH = stage.stageHeight;
             writeLog("onResize: " + SW + "x" + SH);
-            // إعادة تحديد موضع اللعبة إن كانت مشغّلة
-            if (gameLoader && gameLoader.content) {
-                positionGame();
-            }
+            if (gameLoader && gameLoader.content) positionGame();
         }
 
         // ============================================================
@@ -132,23 +151,21 @@ package {
         }
 
         private function onPermissionResult(e:PermissionEvent):void {
-            writeLog("Permission status: " + e.status);
+            writeLog("Permission: " + e.status);
             afterPermission();
         }
 
         private function afterPermission():void {
-            // إنشاء مجلد السجلات إن لم يكن موجوداً
             try {
-                var logsDir:File = new File("/sdcard/NostaGames/logs/");
-                if (!logsDir.exists) logsDir.createDirectory();
-            } catch (err:Error) {}
+                var d:File = new File("/sdcard/NostaGames/logs/");
+                if (!d.exists) d.createDirectory();
+            } catch (e:Error) {}
 
             if (pendingSwfPath) {
-                var f:File = new File(pendingSwfPath);
-                if (f.exists) {
-                    launchGame(f);
-                    return;
-                }
+                try {
+                    var f:File = new File(pendingSwfPath);
+                    if (f.exists) { launchGame(f); return; }
+                } catch (e:Error) {}
             }
             searchAllPaths();
         }
@@ -157,40 +174,33 @@ package {
         // BUILD UI
         // ============================================================
         private function buildUI():void {
-            // عنوان
             var title:TextField = new TextField();
             var tf:TextFormat = new TextFormat("_sans", 26, 0x00FF00, true);
             tf.align = TextFormatAlign.CENTER;
             title.defaultTextFormat = tf;
-            title.text = "NOSTA FLASH PLAYER";
-            title.width = SW;
+            title.text   = "NOSTA FLASH PLAYER";
+            title.width  = SW;
             title.height = 50;
-            title.x = 0;
-            title.y = 30;
+            title.x = 0; title.y = 30;
             title.mouseEnabled = false;
             uiContainer.addChild(title);
 
-            // زر بحث
             var refreshBtn:Sprite = makeButton("🔄 بحث عن ألعاب", 0x1A4A6B, 100);
             refreshBtn.addEventListener(MouseEvent.CLICK, function(e:MouseEvent):void {
-                clearGameButtons();
-                searchAllPaths();
+                clearGameButtons(); searchAllPaths();
             });
             uiContainer.addChild(refreshBtn);
 
-            // زر استيراد يدوي
             var browseBtn:Sprite = makeButton("📂 استيراد SWF يدوياً", 0x1A6B1A, 210);
             browseBtn.addEventListener(MouseEvent.CLICK, onBrowseClick);
             uiContainer.addChild(browseBtn);
 
-            // نص الحالة
             statusText = new TextField();
             var stf:TextFormat = new TextFormat("_sans", 14, 0x888888);
             statusText.defaultTextFormat = stf;
-            statusText.width  = SW - 40;
-            statusText.height = SH - 360;
-            statusText.x = 20;
-            statusText.y = 320;
+            statusText.width    = SW - 40;
+            statusText.height   = SH - 360;
+            statusText.x = 20; statusText.y = 320;
             statusText.multiline = true;
             statusText.wordWrap  = true;
             statusText.text = "جاري التهيئة...";
@@ -205,27 +215,23 @@ package {
             btn.graphics.endFill();
             btn.graphics.lineStyle(2, 0x00FF00);
             btn.graphics.drawRoundRect(0, 0, w, 80, 14);
-            btn.x = (SW - w) / 2;
-            btn.y = yPos;
+            btn.x = (SW - w) / 2; btn.y = yPos;
+            btn.useHandCursor = true; btn.buttonMode = true;
 
             var lbl:TextField = new TextField();
             var fmt:TextFormat = new TextFormat("_sans", 22, 0xFFFFFF, true);
             fmt.align = TextFormatAlign.CENTER;
             lbl.defaultTextFormat = fmt;
             lbl.text   = label;
-            lbl.width  = w;
-            lbl.height = 45;
-            lbl.y = 18;
+            lbl.width  = w; lbl.height = 45; lbl.y = 18;
             lbl.mouseEnabled = false;
             btn.addChild(lbl);
             return btn;
         }
 
-        // يحذف فقط أزرار الألعاب الديناميكية (بعد أول 4 عناصر ثابتة)
         private function clearGameButtons():void {
-            while (uiContainer.numChildren > 4) {
+            while (uiContainer.numChildren > 4)
                 uiContainer.removeChildAt(4);
-            }
         }
 
         // ============================================================
@@ -234,35 +240,28 @@ package {
         private function searchAllPaths():void {
             foundGames = [];
             var log:String = "البحث في المسارات:\n";
-            writeLog("--- بدء البحث عن الألعاب ---");
+            writeLog("--- بدء البحث ---");
 
             for each (var path:String in SEARCH_PATHS) {
                 try {
                     var folder:File = new File(path);
                     log += "\n• " + path + "\n";
-
-                    if (!folder.exists) {
-                        log += "  → غير موجود\n";
-                        writeLog("PATH NOT FOUND: " + path);
-                        continue;
-                    }
+                    if (!folder.exists) { log += "  → غير موجود\n"; continue; }
 
                     var files:Array = folder.getDirectoryListing();
-                    var count:int = 0;
+                    var cnt:int = 0;
                     for each (var f:File in files) {
                         if (f.extension && f.extension.toLowerCase() == "swf") {
                             foundGames.push(f);
-                            count++;
+                            cnt++;
                             log += "  ✅ " + f.name + " (" + Math.round(f.size/1024) + "KB)\n";
                             writeLog("FOUND: " + f.nativePath);
                         }
                     }
-                    if (count == 0) {
-                        log += "  → لا يوجد SWF\n";
-                    }
+                    if (cnt == 0) log += "  → لا يوجد SWF\n";
                 } catch (err:Error) {
-                    log += "  ❌ خطأ: " + err.message + "\n";
-                    writeLog("SEARCH ERROR in " + path + ": " + err.message);
+                    log += "  ❌ " + err.message + "\n";
+                    writeLog("SEARCH ERR: " + err.message);
                 }
             }
 
@@ -270,37 +269,29 @@ package {
 
             if (foundGames.length == 1) {
                 statusText.appendText("\nتشغيل تلقائي: " + foundGames[0].name);
-                writeLog("تشغيل تلقائي: " + foundGames[0].nativePath);
                 launchGame(foundGames[0]);
             } else if (foundGames.length > 1) {
                 showGameList();
             } else {
                 statusText.appendText(
-                    "\n\nلم يتم العثور على ألعاب.\n" +
-                    "ضع ملف SWF في:\n" + SEARCH_PATHS[0] +
-                    "\nأو استخدم زر الاستيراد."
+                    "\n\nلم يتم العثور على ألعاب.\nضع ملف SWF في:\n" +
+                    SEARCH_PATHS[0] + "\nأو استخدم زر الاستيراد."
                 );
-                writeLog("لم يتم العثور على أي لعبة.");
             }
         }
 
         private function showGameList():void {
             clearGameButtons();
-            statusText.text = "تم العثور على " + foundGames.length + " لعبة:";
+            statusText.text = "تم العثور على " + foundGames.length + " لعبة — اختر:";
             var startY:Number = 320;
             var limit:int = Math.min(foundGames.length, 8);
             for (var i:int = 0; i < limit; i++) {
-                var btn:Sprite = makeGameBtn(foundGames[i], startY + i * 85);
-                uiContainer.addChild(btn);
+                uiContainer.addChild(makeGameBtn(foundGames[i], startY + i * 85));
             }
         }
 
-        // ============================================================
-        // GAME BUTTON
-        // ============================================================
         private function makeGameBtn(f:File, y:Number,
-                                     isDirectoryMode:Boolean = false,
-                                     isUpAction:Boolean = false):Sprite {
+                isDirMode:Boolean=false, isUp:Boolean=false):Sprite {
             var w:Number = SW - 40;
             var btn:Sprite = new Sprite();
             btn.graphics.beginFill(0x0D1F0D);
@@ -308,101 +299,53 @@ package {
             btn.graphics.endFill();
             btn.graphics.lineStyle(1, 0x00AA00);
             btn.graphics.drawRoundRect(0, 0, w, 70, 10);
-            btn.x = 20;
-            btn.y = y;
+            btn.x = 20; btn.y = y;
+            btn.useHandCursor = true; btn.buttonMode = true;
 
             var lbl:TextField = new TextField();
             var fmt:TextFormat = new TextFormat("_sans", 20, 0x00FF00);
             lbl.defaultTextFormat = fmt;
 
-            if (isUpAction) {
-                lbl.text = "📁 .. (العودة للخلف)";
-            } else if (isDirectoryMode) {
-                lbl.text = "📁 " + f.name;
-            } else {
-                var sizeMB:Number = Math.round(f.size / 1024 / 1024 * 10) / 10;
-                lbl.text = "▶  " + f.name.replace(/\.swf$/i, "") + "  [" + sizeMB + "MB]";
+            if (isUp)         lbl.text = "📁 .. (العودة)";
+            else if (isDirMode) lbl.text = "📁 " + f.name;
+            else {
+                var mb:Number = Math.round(f.size/1024/1024*10)/10;
+                lbl.text = "▶  " + f.name.replace(/\.swf$/i,"") + "  [" + mb + "MB]";
             }
 
-            lbl.width  = w - 20;
-            lbl.height = 40;
-            lbl.x = 10;
-            lbl.y = 15;
-            lbl.mouseEnabled = false;
+            lbl.width = w-20; lbl.height = 40;
+            lbl.x = 10; lbl.y = 15; lbl.mouseEnabled = false;
             btn.addChild(lbl);
 
-            btn.useHandCursor = true;
-            btn.buttonMode    = true;
-
-            // حفظ مرجع f محلياً للـ closure
-            var targetFile:File = f;
-            var dirMode:Boolean = isDirectoryMode;
-            var upMode:Boolean  = isUpAction;
-
+            var tf:File = f, dm:Boolean = isDirMode, up:Boolean = isUp;
             btn.addEventListener(MouseEvent.CLICK, function(e:MouseEvent):void {
-                if (upMode || dirMode) {
-                    browseDirectory(targetFile);
-                } else {
-                    launchGame(targetFile);
-                }
+                if (up || dm) browseDirectory(tf);
+                else          launchGame(tf);
             });
             return btn;
         }
 
         // ============================================================
-        // INVOKE — يُستدعى عند فتح ملف SWF أو مشاركته
+        // INVOKE
         // ============================================================
         private function onInvoke(e:InvokeEvent):void {
             writeLog("onInvoke: args=" + e.arguments.length);
-
             if (e.arguments && e.arguments.length > 0) {
                 var raw:String = String(e.arguments[0]);
-                writeLog("onInvoke raw arg: " + raw);
-
-                // تنظيف المسار
+                writeLog("onInvoke arg: " + raw);
                 var path:String = raw;
-                if (path.indexOf("file://") == 0) path = decodeURIComponent(path.substring(7));
-                else if (path.indexOf("content://") == 0) {
-                    // content URI — نحاول نسخه إلى مؤقت
-                    path = copyContentUriToTemp(raw);
-                }
+                if (path.indexOf("file://") == 0)
+                    path = decodeURIComponent(path.substring(7));
 
-                writeLog("onInvoke path after clean: " + path);
-
-                if (path != null && path.length > 0) {
-                    try {
-                        var f:File = new File(path);
-                        if (f.exists) {
-                            writeLog("onInvoke: الملف موجود، تشغيل...");
-                            launchGame(f);
-                            return;
-                        } else {
-                            writeLog("onInvoke: الملف غير موجود: " + path);
-                        }
-                    } catch (err:Error) {
-                        writeLog("onInvoke ERROR: " + err.message);
-                    }
+                try {
+                    var f:File = new File(path);
+                    if (f.exists) { launchGame(f); return; }
+                    else writeLog("onInvoke: file not found: " + path);
+                } catch (err:Error) {
+                    writeLog("onInvoke ERR: " + err.message);
                 }
             }
-
-            // إن لم يكن هناك ملف محدد
-            if (uiContainer.visible) {
-                searchAllPaths();
-            }
-        }
-
-        // معالجة content:// URI — ينسخ الملف إلى مؤقت
-        private function copyContentUriToTemp(uri:String):String {
-            try {
-                writeLog("محاولة نسخ content URI: " + uri);
-                var req:URLRequest = new URLRequest(uri);
-                // AIR لا يدعم قراءة content URI مباشرة، نُعيد null
-                writeLog("content URI غير مدعوم مباشرة في AIR");
-                return null;
-            } catch (err:Error) {
-                writeLog("copyContentUri ERROR: " + err.message);
-                return null;
-            }
+            if (uiContainer.visible) searchAllPaths();
         }
 
         // ============================================================
@@ -415,151 +358,133 @@ package {
         private function browseDirectory(dir:File):void {
             clearGameButtons();
             statusText.text = "📁 " + dir.nativePath;
-            writeLog("browseDirectory: " + dir.nativePath);
-
+            writeLog("browse: " + dir.nativePath);
             try {
                 var files:Array = dir.getDirectoryListing();
-                // ترتيب: مجلدات أولاً ثم SWF
                 files.sortOn("name");
+                var y:Number = 320, cnt:int = 0;
 
-                var startY:Number = 320;
-                var count:int     = 0;
-
-                // زر العودة
                 if (dir.parent) {
-                    uiContainer.addChild(makeGameBtn(dir.parent, startY, false, true));
-                    startY += 85;
-                    count++;
+                    uiContainer.addChild(makeGameBtn(dir.parent, y, false, true));
+                    y += 85; cnt++;
                 }
-
                 for each (var f:File in files) {
-                    if (count >= 30) break;
+                    if (cnt >= 30) break;
                     if (f.isDirectory && f.name.indexOf(".") != 0) {
-                        uiContainer.addChild(makeGameBtn(f, startY, true, false));
-                        startY += 85; count++;
+                        uiContainer.addChild(makeGameBtn(f, y, true));
+                        y += 85; cnt++;
                     } else if (f.extension && f.extension.toLowerCase() == "swf") {
-                        uiContainer.addChild(makeGameBtn(f, startY, false, false));
-                        startY += 85; count++;
+                        uiContainer.addChild(makeGameBtn(f, y));
+                        y += 85; cnt++;
                     }
                 }
-
-                if (count == (dir.parent ? 1 : 0)) {
-                    statusText.text += "\n\nهذا المجلد فارغ.";
-                }
             } catch (err:Error) {
-                statusText.text = "❌ خطأ في قراءة المسار: " + err.message;
-                writeLog("browseDirectory ERROR: " + err.message);
+                statusText.text = "❌ " + err.message;
+                writeLog("browse ERR: " + err.message);
             }
         }
 
         // ============================================================
-        // LAUNCH GAME — الأهم، مع كل إصلاحات الشاشة السوداء
+        // LAUNCH GAME
         // ============================================================
         private function launchGame(f:File):void {
-            writeLog("=== launchGame: " + f.nativePath + " (" + f.size + " bytes) ===");
+            writeLog("=== launchGame: " + f.name + " (" + f.size + " bytes) ===");
 
             try {
-                // قراءة الملف
                 var stream:FileStream = new FileStream();
                 stream.open(f, FileMode.READ);
                 var bytes:ByteArray = new ByteArray();
                 stream.readBytes(bytes);
                 stream.close();
 
-                writeLog("تم قراءة الملف: " + bytes.length + " bytes");
-
                 // التحقق من توقيع SWF
                 bytes.position = 0;
                 var sig:String = "";
-                for (var i:int = 0; i < Math.min(3, bytes.length); i++) {
-                    sig += String.fromCharCode(bytes[i]);
-                }
-                writeLog("SWF signature: " + sig);
+                for (var i:int = 0; i < 3; i++) sig += String.fromCharCode(bytes[i]);
+                writeLog("SWF sig: " + sig);
 
                 if (sig != "CWS" && sig != "FWS" && sig != "ZWS") {
-                    writeLog("❌ ليس ملف SWF صالح! التوقيع: " + sig);
-                    statusText.text = "❌ الملف ليس SWF صالح.\nالتوقيع: " + sig;
-                    uiContainer.visible = true;
+                    writeLog("❌ ليس SWF صالح: " + sig);
+                    showError("الملف ليس SWF صالح\nالتوقيع: " + sig);
                     return;
                 }
 
-                // تنظيف الـ loader القديم
-                destroyLoader();
+                // قراءة حجم SWF الداخلي من الـ header
+                bytes.position = 4;
+                var swfInternalSize:uint = bytes.readUnsignedInt();
+                writeLog("SWF internal size: " + swfInternalSize);
 
-                // إخفاء الواجهة
+                destroyLoader();
+                positionRetryCount = 0;
                 uiContainer.visible = false;
 
-                // إنشاء Loader جديد
                 gameLoader = new Loader();
-                gameLoader.contentLoaderInfo.addEventListener(Event.INIT,       onGameInit);
-                gameLoader.contentLoaderInfo.addEventListener(Event.COMPLETE,   onGameComplete);
+
+                // اصطياد أخطاء اللعبة نفسها — نستمر ولا نوقف
+                gameLoader.uncaughtErrorEvents.addEventListener(
+                    UncaughtErrorEvent.UNCAUGHT_ERROR, onGameUncaughtError
+                );
+                gameLoader.contentLoaderInfo.addEventListener(Event.INIT,            onGameInit);
+                gameLoader.contentLoaderInfo.addEventListener(Event.COMPLETE,        onGameComplete);
                 gameLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onLoadError);
                 gameLoader.contentLoaderInfo.addEventListener(ErrorEvent.ERROR,      onLoadError);
 
-                // إضافة قبل التحميل
+                // وضع الـ loader خلف الـ uiContainer
                 addChildAt(gameLoader, 0);
 
-                var ctx:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
+                var ctx:LoaderContext = new LoaderContext(false, new ApplicationDomain(null));
                 ctx.allowCodeImport = true;
 
                 bytes.position = 0;
                 gameLoader.loadBytes(bytes, ctx);
-
                 writeLog("loadBytes بدأ...");
 
             } catch (err:Error) {
-                uiContainer.visible = true;
-                statusText.text = "❌ خطأ تشغيل: " + err.message;
-                writeLog("launchGame EXCEPTION: " + err.message + "\n" + err.getStackTrace());
+                showError("خطأ تشغيل:\n" + err.message);
+                writeLog("launchGame EXCEPTION: " + err.message);
             }
         }
 
-        private function destroyLoader():void {
-            if (gameLoader) {
-                try {
-                    gameLoader.contentLoaderInfo.removeEventListener(Event.INIT,       onGameInit);
-                    gameLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE,   onGameComplete);
-                    gameLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onLoadError);
-                    gameLoader.contentLoaderInfo.removeEventListener(ErrorEvent.ERROR,      onLoadError);
-                    if (contains(gameLoader)) removeChild(gameLoader);
-                    gameLoader.unloadAndStop(true);
-                } catch (e:Error) {
-                    writeLog("destroyLoader error: " + e.message);
-                }
-                gameLoader = null;
-            }
-        }
-
-        // يُستدعى عند اكتمال تحميل الهيكل الأساسي للـ SWF
+        // ============================================================
+        // GAME EVENTS
+        // ============================================================
         private function onGameInit(e:Event):void {
-            writeLog("onGameInit: " +
-                gameLoader.contentLoaderInfo.width + "x" +
-                gameLoader.contentLoaderInfo.height +
-                " frameRate=" + gameLoader.contentLoaderInfo.frameRate);
+            var info:* = gameLoader.contentLoaderInfo;
+            writeLog("onGameInit: " + info.width + "x" + info.height +
+                     " | frameRate=" + info.frameRate);
             positionGame();
         }
 
-        // يُستدعى عند اكتمال التحميل الكامل
         private function onGameComplete(e:Event):void {
-            writeLog("onGameComplete — اللعبة اكتملت.");
+            writeLog("onGameComplete ✓");
             positionGame();
         }
 
         // ============================================================
-        // POSITION GAME — إصلاح الشاشة السوداء
+        // POSITION GAME — مع retry للألعاب التي تأخذ وقتاً
         // ============================================================
         private function positionGame():void {
             if (!gameLoader) return;
 
-            var info:* = gameLoader.contentLoaderInfo;
-            var swfW:Number = info.width  > 0 ? info.width  : 550;
-            var swfH:Number = info.height > 0 ? info.height : 400;
+            var info:*      = gameLoader.contentLoaderInfo;
+            var swfW:Number = info.width;
+            var swfH:Number = info.height;
 
-            // أبعاد الشاشة المحدّثة
+            // إذا كانت الأبعاد صفر، ننتظر وإعادة المحاولة
+            if ((swfW <= 0 || swfH <= 0) && positionRetryCount < MAX_POSITION_RETRIES) {
+                positionRetryCount++;
+                writeLog("positionGame: أبعاد صفر، محاولة " + positionRetryCount);
+                setTimeout(positionGame, 100);
+                return;
+            }
+
+            // fallback للألعاب التي لا تُعلن عن حجمها
+            if (swfW <= 0) swfW = 550;
+            if (swfH <= 0) swfH = 400;
+
             var scrW:Number = stage.stageWidth  > 0 ? stage.stageWidth  : SW;
             var scrH:Number = stage.stageHeight > 0 ? stage.stageHeight : SH;
 
-            // نسبة التكبير للملء مع الحفاظ على النسبة
             var scale:Number = Math.min(scrW / swfW, scrH / swfH);
 
             gameLoader.scaleX = scale;
@@ -567,42 +492,89 @@ package {
             gameLoader.x = Math.round((scrW - swfW * scale) / 2);
             gameLoader.y = Math.round((scrH - swfH * scale) / 2);
 
-            writeLog("positionGame: swf=" + swfW + "x" + swfH +
-                     " screen=" + scrW + "x" + scrH +
+            writeLog("positionGame ✓ swf=" + swfW + "x" + swfH +
                      " scale=" + scale.toFixed(3) +
                      " pos=(" + gameLoader.x + "," + gameLoader.y + ")");
 
-            // التأكد أن الـ loader فوق الخلفية وتحت الـ uiContainer
-            var loaderIndex:int = getChildIndex(gameLoader);
-            var bgIndex:int     = 0; // الخلفية دائماً index 0
-            if (loaderIndex <= bgIndex) {
-                setChildIndex(gameLoader, 1);
+            // ضمان ترتيب الطبقات: خلفية(0) → لعبة(1) → واجهة(2)
+            if (contains(gameLoader)) {
+                var idx:int = getChildIndex(gameLoader);
+                if (idx != 1) setChildIndex(gameLoader, 1);
             }
         }
 
         // ============================================================
-        // ERROR HANDLERS
+        // خطأ من داخل اللعبة — نسجّله ونستمر
         // ============================================================
+        private function onGameUncaughtError(e:UncaughtErrorEvent):void {
+            var msg:String = "";
+            if (e.error is Error) {
+                var err:Error = e.error as Error;
+                msg = "Error #" + err.errorID + ": " + err.message;
+                var stack:String = err.getStackTrace();
+                if (stack) msg += "\n" + stack;
+            } else if (e.error is ErrorEvent) {
+                msg = (e.error as ErrorEvent).text;
+            } else {
+                msg = String(e.error);
+            }
+
+            writeLog("⚠ GameError (ignored): " + msg);
+
+            // لا نوقف التطبيق — اللعبة ستستمر
+            e.preventDefault();
+
+            // إذا كانت شاشة سوداء بعد 2 ثانية، نحاول إعادة تحديد الموضع
+            setTimeout(function():void {
+                if (gameLoader && !uiContainer.visible) positionGame();
+            }, 2000);
+        }
+
         private function onLoadError(e:*):void {
-            var msg:String = (e is IOErrorEvent) ? (e as IOErrorEvent).text : String(e);
+            var msg:String = (e is IOErrorEvent)
+                ? (e as IOErrorEvent).text
+                : String(e);
             writeLog("❌ onLoadError: " + msg);
-            uiContainer.visible = true;
-            statusText.text = "❌ فشل تحميل اللعبة:\n" + msg +
-                              "\n\nتحقق من سجل الأخطاء في:\n/sdcard/NostaGames/logs/";
+            showError("فشل تحميل اللعبة:\n" + msg);
             destroyLoader();
         }
 
         private function onUncaughtError(e:UncaughtErrorEvent):void {
-            var msg:String = "";
-            if (e.error is Error)       msg = (e.error as Error).getStackTrace();
-            else if (e.error is ErrorEvent) msg = (e.error as ErrorEvent).text;
-            else msg = String(e.error);
-            writeLog("!!! UncaughtError: " + msg);
+            var msg:String = (e.error is Error)
+                ? (e.error as Error).getStackTrace()
+                : String(e.error);
+            writeLog("!!! AppUncaughtError: " + msg);
             e.preventDefault();
         }
 
         // ============================================================
-        // EXIT — حفظ السجل + نسخ للـ Clipboard
+        // HELPERS
+        // ============================================================
+        private function showError(msg:String):void {
+            uiContainer.visible = true;
+            statusText.text = "❌ " + msg +
+                "\n\n📋 السجل الكامل في:\n/sdcard/NostaGames/logs/nosta_player_log.txt";
+        }
+
+        private function destroyLoader():void {
+            if (!gameLoader) return;
+            try {
+                gameLoader.uncaughtErrorEvents.removeEventListener(
+                    UncaughtErrorEvent.UNCAUGHT_ERROR, onGameUncaughtError);
+                gameLoader.contentLoaderInfo.removeEventListener(Event.INIT,            onGameInit);
+                gameLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE,        onGameComplete);
+                gameLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onLoadError);
+                gameLoader.contentLoaderInfo.removeEventListener(ErrorEvent.ERROR,      onLoadError);
+                if (contains(gameLoader)) removeChild(gameLoader);
+                gameLoader.unloadAndStop(true);
+            } catch (e:Error) {
+                writeLog("destroyLoader err: " + e.message);
+            }
+            gameLoader = null;
+        }
+
+        // ============================================================
+        // EXIT
         // ============================================================
         private function onExiting(e:Event):void {
             writeLog("=== التطبيق يُغلق ===");
@@ -611,47 +583,40 @@ package {
         }
 
         // ============================================================
-        // LOG SYSTEM
+        // LOG
         // ============================================================
         private function writeLog(msg:String):void {
-            var now:Date    = new Date();
-            var timestamp:String = now.getHours() + ":" +
+            var now:Date = new Date();
+            var ts:String = now.getHours() + ":" +
                 pad2(now.getMinutes()) + ":" +
                 pad2(now.getSeconds());
-            var line:String = "[" + timestamp + "] " + msg;
-            logLines.push(line);
-
-            // حفظ فوري كل 10 سطور
-            if (logLines.length % 10 == 0) {
-                flushLogToFile();
-            }
+            logLines.push("[" + ts + "] " + msg);
+            if (logLines.length % 10 == 0) flushLogToFile();
         }
 
         private function flushLogToFile():void {
             try {
-                var logsDir:File = new File("/sdcard/NostaGames/logs/");
-                if (!logsDir.exists) logsDir.createDirectory();
-
-                var stream:FileStream = new FileStream();
-                stream.open(logFile, FileMode.WRITE);
-                stream.writeUTFBytes(logLines.join("\n") + "\n");
-                stream.close();
-            } catch (err:Error) {
-                // لا نستطيع كتابة سجل هنا لتجنب التكرار اللانهائي
-            }
+                var d:File = new File("/sdcard/NostaGames/logs/");
+                if (!d.exists) d.createDirectory();
+                var s:FileStream = new FileStream();
+                s.open(logFile, FileMode.WRITE);
+                s.writeUTFBytes(logLines.join("\n") + "\n");
+                s.close();
+            } catch (e:Error) {}
         }
 
         private function copyLogToClipboard():void {
             try {
-                var fullLog:String = "=== Nosta Flash Player Log ===\n" +
-                                     logLines.join("\n");
                 Clipboard.generalClipboard.clear();
-                Clipboard.generalClipboard.setData(ClipboardFormats.TEXT_FORMAT, fullLog);
-            } catch (err:Error) {}
+                Clipboard.generalClipboard.setData(
+                    ClipboardFormats.TEXT_FORMAT,
+                    "=== Nosta Flash Player Log ===\n" + logLines.join("\n")
+                );
+            } catch (e:Error) {}
         }
 
         private function pad2(n:int):String {
-            return n < 10 ? "0" + n : String(n);
+            return n < 10 ? "0"+n : String(n);
         }
     }
 }

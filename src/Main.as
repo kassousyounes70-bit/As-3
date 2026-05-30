@@ -21,15 +21,10 @@ package {
 
     public class Main extends Sprite {
 
-        // مسارات البحث عن ملفات SWF
         private static const SEARCH_PATHS:Array = [
-            // مجلد التطبيق الرئيسي المشترك
             "/sdcard/Android/data/com.ncore.nostagames/files/flash_games/",
-            // مجلد التطبيق نفسه
             File.applicationStorageDirectory.nativePath + "/flash_games/",
-            // مجلد Downloads
             "/sdcard/Download/",
-            // مجلد الجذر
             "/sdcard/"
         ];
 
@@ -39,7 +34,7 @@ package {
         private var foundGames:Array = [];
 
         public function Main() {
-            stage.align     = StageAlign.TOP_LEFT;
+            stage.align = StageAlign.TOP_LEFT;
             stage.scaleMode = StageScaleMode.NO_SCALE;
 
             graphics.beginFill(0x0A0A0A);
@@ -51,10 +46,8 @@ package {
 
             buildUI();
 
-            NativeApplication.nativeApplication.addEventListener(
-                InvokeEvent.INVOKE, onInvoke);
+            NativeApplication.nativeApplication.addEventListener(InvokeEvent.INVOKE, onInvoke);
 
-            // ابدأ البحث فوراً
             searchAllPaths();
         }
 
@@ -64,14 +57,13 @@ package {
             tf.align = TextFormatAlign.CENTER;
             title.defaultTextFormat = tf;
             title.text = "NOSTA FLASH PLAYER";
-            title.width  = stage.stageWidth || 1920;
+            title.width = stage.stageWidth || 1920;
             title.height = 50;
             title.x = 0;
             title.y = 30;
             title.mouseEnabled = false;
             uiContainer.addChild(title);
 
-            // زر تحديث البحث
             var refreshBtn:Sprite = makeButton("🔄 بحث عن ألعاب", 0x1A4A6B, 100);
             refreshBtn.addEventListener(MouseEvent.CLICK, function(e:MouseEvent):void {
                 clearUI();
@@ -79,21 +71,19 @@ package {
             });
             uiContainer.addChild(refreshBtn);
 
-            // زر استيراد يدوي
             var browseBtn:Sprite = makeButton("📂 استيراد SWF يدوياً", 0x1A6B1A, 210);
             browseBtn.addEventListener(MouseEvent.CLICK, onBrowseClick);
             uiContainer.addChild(browseBtn);
 
-            // نص الحالة
             statusText = new TextField();
             var stf:TextFormat = new TextFormat("_sans", 16, 0x888888);
             statusText.defaultTextFormat = stf;
-            statusText.width   = (stage.stageWidth || 1920) - 40;
-            statusText.height  = 400;
+            statusText.width = (stage.stageWidth || 1920) - 40;
+            statusText.height = 400;
             statusText.x = 20;
             statusText.y = 320;
             statusText.multiline = true;
-            statusText.wordWrap  = true;
+            statusText.wordWrap = true;
             statusText.text = "جاري البحث...";
             uiContainer.addChild(statusText);
         }
@@ -122,7 +112,6 @@ package {
             return btn;
         }
 
-        // ── البحث في كل المسارات ──
         private function searchAllPaths():void {
             foundGames = [];
             var log:String = "البحث في المسارات:\n";
@@ -147,30 +136,23 @@ package {
                         }
                     }
                     if (count == 0) log += "  → لا يوجد SWF\n";
-
                 } catch (err:Error) {
                     log += "  ❌ خطأ: " + err.message + "\n";
                 }
             }
 
             statusText.text = log;
-
             if (foundGames.length == 1) {
-                // لعبة واحدة — شغّلها مباشرة
                 statusText.appendText("\nتشغيل تلقائي: " + foundGames[0].name);
                 launchGame(foundGames[0]);
             } else if (foundGames.length > 1) {
                 showGameList();
             } else {
-                statusText.appendText("\n\nلم يتم العثور على ألعاب.\n");
-                statusText.appendText("ضع ملف SWF في:\n");
-                statusText.appendText(SEARCH_PATHS[0] + "\n");
-                statusText.appendText("أو استخدم زر الاستيراد.");
+                statusText.appendText("\n\nلم يتم العثور على ألعاب.\nضع ملف SWF في:\n" + SEARCH_PATHS[0] + "\nأو استخدم زر الاستيراد.");
             }
         }
 
         private function clearUI():void {
-            // احذف بطاقات الألعاب القديمة
             while (uiContainer.numChildren > 4) {
                 uiContainer.removeChildAt(4);
             }
@@ -185,7 +167,7 @@ package {
             }
         }
 
-        private function makeGameBtn(f:File, y:Number):Sprite {
+        private function makeGameBtn(f:File, y:Number, isDirectoryMode:Boolean = false, isUpAction:Boolean = false):Sprite {
             var w:Number = (stage.stageWidth || 1920) - 40;
             var btn:Sprite = new Sprite();
             btn.graphics.beginFill(0x0D1F0D);
@@ -198,20 +180,30 @@ package {
             var lbl:TextField = new TextField();
             var fmt:TextFormat = new TextFormat("_sans", 20, 0x00FF00);
             lbl.defaultTextFormat = fmt;
-            lbl.text = "▶  " + f.name.replace(/\.swf$/i, "") +
-                       "  [" + Math.round(f.size/1024/1024*10)/10 + "MB]";
+
+            if (isUpAction) {
+                lbl.text = "📁 .. (العودة للخلف)";
+            } else if (isDirectoryMode) {
+                lbl.text = "📁 " + f.name;
+            } else {
+                lbl.text = "▶  " + f.name.replace(/\.swf$/i, "") + "  [" + Math.round(f.size/1024/1024*10)/10 + "MB]";
+            }
+
             lbl.width = w - 20; lbl.height = 40;
             lbl.x = 10; lbl.y = 15;
             lbl.mouseEnabled = false;
             btn.addChild(lbl);
 
             btn.addEventListener(MouseEvent.CLICK, function(e:MouseEvent):void {
-                launchGame(f);
+                if (isUpAction || isDirectoryMode) {
+                    browseDirectory(f);
+                } else {
+                    launchGame(f);
+                }
             });
             return btn;
         }
 
-        // ── Invoke من التطبيق الرئيسي ──
         private function onInvoke(e:InvokeEvent):void {
             if (e.arguments && e.arguments.length > 0) {
                 var path:String = e.arguments[0];
@@ -224,31 +216,47 @@ package {
             searchAllPaths();
         }
 
-        // ── استيراد يدوي ──
         private function onBrowseClick(e:MouseEvent):void {
+            browseDirectory(new File("/sdcard/"));
+        }
+
+        private function browseDirectory(dir:File):void {
+            clearUI();
+            statusText.text = dir.nativePath;
             try {
-                var picker:File = new File();
-                picker.addEventListener(Event.SELECT, function(ev:Event):void {
-                    launchGame(picker);
-                });
-                picker.addEventListener(Event.CANCEL, function(ev:Event):void {
-                    statusText.text = "تم الإلغاء.";
-                });
-                picker.browseForOpen("اختر ملف SWF", [
-                    new flash.net.FileFilter("Flash Games", "*.swf")
-                ]);
+                var files:Array = dir.getDirectoryListing();
+                var startY:Number = 320;
+                var displayCount:int = 0;
+
+                if (dir.parent) {
+                    var upBtn:Sprite = makeGameBtn(dir.parent, startY, false, true);
+                    uiContainer.addChild(upBtn);
+                    startY += 85;
+                    displayCount++;
+                }
+
+                for each (var f:File in files) {
+                    if (displayCount >= 30) break;
+                    if (f.isDirectory && f.name.indexOf(".") != 0) {
+                        var dirBtn:Sprite = makeGameBtn(f, startY, true, false);
+                        uiContainer.addChild(dirBtn);
+                        startY += 85;
+                        displayCount++;
+                    } else if (f.extension && f.extension.toLowerCase() == "swf") {
+                        var fileBtn:Sprite = makeGameBtn(f, startY, false, false);
+                        uiContainer.addChild(fileBtn);
+                        startY += 85;
+                        displayCount++;
+                    }
+                }
             } catch (err:Error) {
-                statusText.text = "خطأ في فتح المستعرض: " + err.message +
-                    "\n\nضع ملف SWF في:\n" + SEARCH_PATHS[0] +
-                    "\nثم اضغط 'بحث عن ألعاب'";
+                statusText.text = "خطأ في قراءة المسار: " + err.message;
             }
         }
 
-        // ── تشغيل اللعبة ──
         private function launchGame(f:File):void {
             try {
                 statusText.text = "جاري تحميل: " + f.name;
-
                 var stream:FileStream = new FileStream();
                 stream.open(f, FileMode.READ);
                 var bytes:ByteArray = new ByteArray();
@@ -262,14 +270,11 @@ package {
                 }
 
                 uiContainer.visible = false;
-
                 gameLoader = new Loader();
-                gameLoader.contentLoaderInfo.addEventListener(
-                    IOErrorEvent.IO_ERROR, onError);
+                gameLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onError);
                 addChild(gameLoader);
 
-                var ctx:LoaderContext = new LoaderContext(
-                    false, ApplicationDomain.currentDomain);
+                var ctx:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
                 ctx.allowCodeImport = true;
                 gameLoader.loadBytes(bytes, ctx);
 

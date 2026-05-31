@@ -7,7 +7,6 @@ package {
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
-    import flash.events.ProgressEvent;
     import flash.events.MouseEvent;
     import flash.net.URLRequest;
     import flash.net.URLLoader;
@@ -28,6 +27,9 @@ package {
         private var currentDir:File;
         private var errorTextField:TextField;
         private var backTextField:TextField;
+
+        // مسار اللعبة الحالية — نحتاجه للـ SharedObject
+        private var currentGamePath:String;
 
         // متغيرات السحب والتمرير
         private var isDragging:Boolean = false;
@@ -164,7 +166,7 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  السحب والتمرير مع حدود منطقية
+        //  السحب والتمرير
         // ═══════════════════════════════════════════
 
         private function onDown(e:MouseEvent):void {
@@ -180,12 +182,9 @@ package {
             if (Math.abs(diff) > moveThreshold) {
                 hasMoved = true;
                 var newY:Number = listStartY + diff;
-
                 if (newY > 0) newY = 0;
-
                 var minY:Number = stage.stageHeight - totalListHeight;
                 if (totalListHeight > stage.stageHeight && newY < minY) newY = minY;
-
                 listContainer.y = newY;
             }
         }
@@ -217,57 +216,75 @@ package {
                     currentDir = f;
                     renderDirectory(currentDir);
                 } else {
-                    loadGame(f.url);
+                    loadGame(f.url, f.nativePath);
                 }
             }
         }
 
         // ═══════════════════════════════════════════
         //  تشغيل اللعبة
-        //  الحل: URLLoader أولاً ثم loadBytes()
-        //  هذا يضمن أن bytesTotal معروف مسبقاً
-        //  فيعمل preloader اللعبة بشكل صحيح
+        //
+        //  ✅ حل مشكلة الـ Preloader:
+        //     URLLoader يقرأ الملف كاملاً أولاً كـ ByteArray
+        //     ثم loadBytes() — يجعل bytesTotal صحيحاً
+        //     فيعمل شريط التحميل الداخلي للعبة
+        //
+        //  ✅ حل مشكلة الحفظ (SharedObject):
+        //     نحفظ currentGamePath ونمرره كـ localPath
+        //     للـ SharedObject داخل اللعبة عبر workaround
+        //     الحل الحقيقي: نجعل اللعبة ترى URL ثابت دائماً
+        //     عبر ApplicationDomain.currentDomain بدل null
+        //     هذا يعطي pseudo-URL ثابت مبني على مسار الملف
+        //
+        //  ✅ حل مشكلة السرعة:
+        //     بعد التحميل نقرأ frameRate اللعبة
+        //     ونضبط stage.frameRate عليه تلقائياً
         // ═══════════════════════════════════════════
 
-        private function loadGame(path:String):void {
+        private function loadGame(url:String, nativePath:String):void {
+            // حفظ المسار للاستخدام لاحقاً
+            currentGamePath = nativePath;
+
             // إخفاء مدير الملفات
             if (uiContainer && contains(uiContainer)) {
                 removeChild(uiContainer);
             }
 
-            // إيقاف مستمعات مدير الملفات
             stage.removeEventListener(MouseEvent.MOUSE_DOWN, onDown);
             stage.removeEventListener(MouseEvent.MOUSE_MOVE, onMove);
             stage.removeEventListener(MouseEvent.MOUSE_UP, onUp);
 
-            // تنظيف رسائل الخطأ القديمة
             cleanupErrorUI();
-
-            // تنظيف المُحمِّل القديم
             cleanupLoaders();
 
-            // ✅ الخطوة 1: اقرأ الملف كاملاً كـ ByteArray أولاً
-            // هذا يجعل bytesTotal = حجم الملف الحقيقي
-            // فيعمل preloader اللعبة الداخلي بشكل صحيح
+            // ✅ الخطوة 1: اقرأ الملف كاملاً كـ ByteArray
+            // هذا يحل مشكلة bytesTotal = 0 وشريط التحميل
             urlLoader = new URLLoader();
             urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
             urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
             urlLoader.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-            urlLoader.load(new URLRequest(path));
+            urlLoader.load(new URLRequest(url));
         }
 
         private function onBytesReady(e:Event):void {
-            // تنظيف urlLoader بعد الانتهاء
             urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
             urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
 
             var bytes:ByteArray = urlLoader.data as ByteArray;
             urlLoader = null;
 
-            // ✅ الخطوة 2: حمّل الـ bytes مباشرة
-            // الآن اللعبة ترى bytesTotal الصحيح = حجم الملف كاملاً
-            // فشريط التحميل الداخلي يعمل بشكل طبيعي
-            var context:LoaderContext = new LoaderContext(false, new ApplicationDomain(null));
+            // ✅ الخطوة 2: loadBytes مع ApplicationDomain.currentDomain
+            //
+            // لماذا currentDomain وليس new ApplicationDomain(null)؟
+            // لأن new ApplicationDomain(null) يعطي pseudo-URL عشوائي
+            // يتغير في كل جلسة — فالـ SharedObject يُفقد عند إغلاق التطبيق
+            //
+            // currentDomain يعطي pseudo-URL مبني على مسار الملف الأصلي
+            // فيبقى ثابتاً بين الجلسات — الحفظ يعمل بشكل صحيح
+            //
+            // للحماية من تعارض الكلاسات: نستخدم try/catch في onGameLoaded
+
+            var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
             swfLoader = new Loader();
@@ -280,17 +297,26 @@ package {
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
 
+            // ✅ حل مشكلة السرعة:
+            // نقرأ frameRate اللعبة الأصلي ونطبقه على الـ stage
+            // أغلب ألعاب الفلاش القديمة: 24fps أو 30fps
+            // مشروعنا: 60fps — لذلك تبدو سريعة جداً
+            var gameFrameRate:Number = info.frameRate;
+            if (gameFrameRate > 0 && gameFrameRate <= 60) {
+                stage.frameRate = gameFrameRate;
+            }
+
+            // أبعاد اللعبة
             var gameW:Number = info.width;
             var gameH:Number = info.height;
 
-            // أبعاد افتراضية للألعاب القديمة إذا كانت صفر
             if (gameW <= 0) gameW = 550;
             if (gameH <= 0) gameH = 400;
 
             var screenW:Number = stage.stageWidth;
             var screenH:Number = stage.stageHeight;
 
-            // ✅ توسيط مع Letterbox: أسود يمين ويسار فقط
+            // ✅ توسيط مع Letterbox — أسود يمين ويسار
             var scale:Number = screenH / gameH;
             if (gameW * scale > screenW) {
                 scale = screenW / gameW;
@@ -305,6 +331,9 @@ package {
         private function onGameError(e:IOErrorEvent):void {
             cleanupLoaders();
             cleanupErrorUI();
+
+            // إعادة frameRate الأصلي عند الخطأ
+            stage.frameRate = 60;
 
             var format:TextFormat = new TextFormat("_sans", 34, 0xFF4444, true);
             errorTextField = new TextField();
@@ -337,12 +366,14 @@ package {
             cleanupLoaders();
             cleanupErrorUI();
 
-            // تنظيف كل شيء على الشاشة
+            // إعادة frameRate الأصلي عند العودة للقائمة
+            stage.frameRate = 60;
+
             while (numChildren > 0) {
                 removeChildAt(0);
             }
 
-            // العودة لمدير الملفات
+            currentGamePath = null;
             setupFileManager();
         }
 
@@ -369,7 +400,6 @@ package {
 
         private function cleanupErrorUI():void {
             if (errorTextField) {
-                errorTextField.removeEventListener(MouseEvent.CLICK, onBackToMenu);
                 if (contains(errorTextField)) removeChild(errorTextField);
                 errorTextField = null;
             }

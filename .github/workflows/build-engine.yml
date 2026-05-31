@@ -13,27 +13,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Setup Java 11 (Strict Requirement for AIR SDK)
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '11'
           distribution: 'temurin'
 
-      - name: Setup HARMAN AIR SDK
-        uses: joshtynjala/setup-airsdk@v2
-        with:
-          accept-license: true
+      - name: Download and Setup AIR SDK Manually
+        run: |
+          $urls = @(
+              "https://airsdk.harman.com/assets/downloads/33.1.1.932/AIRSDK_Compiler.zip",
+              "https://airdownload.adobe.com/air/win/download/32.0/AIRSDK_Compiler.zip"
+          )
+          
+          foreach ($url in $urls) {
+              try {
+                  Write-Host "جاري محاولة التحميل من: $url"
+                  Invoke-WebRequest -Uri $url -OutFile "airsdk.zip" -ErrorAction Stop
+                  Write-Host "✅ تم التحميل بنجاح!"
+                  break
+              } catch {
+                  Write-Host "❌ فشل التحميل من هذا الرابط، جاري تجربة الرابط البديل..."
+              }
+          }
+          
+          Write-Host "جاري فك الضغط (قد يستغرق بعض الوقت)..."
+          Expand-Archive -Path "airsdk.zip" -DestinationPath "airsdk" -Force
+          
+          Write-Host "حقن مسارات المترجم في بيئة النظام..."
+          $binPath = "$((Get-Item .).FullName)\airsdk\bin"
+          echo "$binPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
 
-      - name: Compile AS3 to SWF
+      - name: Verify Compiler Core
+        run: |
+          amxmlc -version
+          adt -version
+
+      - name: Compile ActionScript to SWF
         run: amxmlc Main.as -output Main.swf
 
       - name: Generate Security Certificate
         run: adt -certificate -validityPeriod 25 -dir CN=Nostagames 2048-RSA cert.p12 password
 
-      - name: Package APK
+      - name: Package APK (Captive Runtime)
         run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostagamesEngine.apk NostagamesEngine-app.xml Main.swf
 
-      - name: Upload APK
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Nostagames-Engine-APK

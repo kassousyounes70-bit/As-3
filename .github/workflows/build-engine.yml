@@ -48,8 +48,8 @@ jobs:
       - name: Compile ActionScript to SWF
         run: amxmlc Main.as -output Main.swf
 
-      - name: Generate Security Certificate
-        run: adt -certificate -cn Nostagames -validityPeriod 25 2048-RSA cert.p12 password
+      - name: Generate Security Certificate (Max Valid Year is 2049)
+        run: adt -certificate -cn Nostagames -validityPeriod 20 2048-RSA cert.p12 password
 
       - name: Package APK
         run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostagamesEngine.apk NostagamesEngine-app.xml Main.swf

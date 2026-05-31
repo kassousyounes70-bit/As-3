@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -19,22 +19,19 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup HARMAN AIR SDK
+        uses: joshtynjala/setup-airsdk@v2
         with:
-          node-version: '20'
-
-      - name: Install AIR SDK Compiler
-        run: npm install -g @airsdk/compiler
+          accept-license: true
 
       - name: Compile AS3 to SWF
-        run: npx @airsdk/compiler amxmlc Main.as -output Main.swf
+        run: amxmlc Main.as -output Main.swf
 
       - name: Generate Security Certificate
-        run: npx @airsdk/compiler adt -certificate -validityPeriod 25 -dir CN=Nostagames 2048-RSA cert.p12 password
+        run: adt -certificate -validityPeriod 25 -dir CN=Nostagames 2048-RSA cert.p12 password
 
       - name: Package APK
-        run: npx @airsdk/compiler adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostagamesEngine.apk NostagamesEngine-app.xml Main.swf
+        run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostagamesEngine.apk NostagamesEngine-app.xml Main.swf
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -42,4 +39,3 @@ jobs:
           name: Nostagames-Engine-APK
           path: NostagamesEngine.apk
           retention-days: 30
-          

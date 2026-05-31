@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<application xmlns="http://ns.adobe.com/air/application/33.1">
+    <id>com.ncore.player.engine</id>
+    <versionNumber>1.0.0</versionNumber>
+    <filename>NostagamesEngine</filename>
+    <name>Nostagames Engine</name>
+    <initialWindow>
+        <content>Main.swf</content>
+        <visible>true</visible>
+        <fullScreen>true</fullScreen>
+        <autoOrients>true</autoOrients>
+        <aspectRatio>landscape</aspectRatio>
+        <renderMode>direct</renderMode>
+    </initialWindow>
+    <android>
+        <manifestAdditions><![CDATA[
+            <manifest android:installLocation="auto">
+                <uses-permission android:name="android.permission.INTERNET"/>
+                <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+                <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+                <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>
+                <uses-permission android:name="android.permission.WAKE_LOCK"/>
+                <uses-permission android:name="android.permission.DISABLE_KEYGUARD"/>
+                <application android:requestLegacyExternalStorage="true" />
+            </manifest>
+        ]]></manifestAdditions>
+    </android>
+</application>

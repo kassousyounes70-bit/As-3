@@ -7,34 +7,37 @@ package {
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
+    import flash.events.ProgressEvent;
     import flash.events.MouseEvent;
     import flash.net.URLRequest;
+    import flash.net.URLLoader;
+    import flash.net.URLLoaderDataFormat;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
     import flash.filesystem.File;
     import flash.text.TextField;
     import flash.text.TextFormat;
+    import flash.utils.ByteArray;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
     public class Main extends Sprite {
         private var swfLoader:Loader;
+        private var urlLoader:URLLoader;
         private var uiContainer:Sprite;
         private var listContainer:Sprite;
         private var currentDir:File;
         private var errorTextField:TextField;
+        private var backTextField:TextField;
 
-        // متغيرات محرك السحب والتمرير
+        // متغيرات السحب والتمرير
         private var isDragging:Boolean = false;
         private var startY:Number;
         private var listStartY:Number;
         private var moveThreshold:Number = 15;
         private var hasMoved:Boolean = false;
-
-        // ارتفاع إجمالي للقائمة لحساب حدود التمرير
         private var totalListHeight:Number = 0;
 
         public function Main() {
-            // انتظار جاهزية الـ stage قبل أي شيء
             if (stage) {
                 init();
             } else {
@@ -178,10 +181,8 @@ package {
                 hasMoved = true;
                 var newY:Number = listStartY + diff;
 
-                // حد أعلى: لا تسحب للأسفل أكثر من الصفر
                 if (newY > 0) newY = 0;
 
-                // حد أسفل: لا تسحب أكثر من ارتفاع القائمة
                 var minY:Number = stage.stageHeight - totalListHeight;
                 if (totalListHeight > stage.stageHeight && newY < minY) newY = minY;
 
@@ -222,7 +223,10 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  تشغيل اللعبة — مع دعم AVM1 و AVM2
+        //  تشغيل اللعبة
+        //  الحل: URLLoader أولاً ثم loadBytes()
+        //  هذا يضمن أن bytesTotal معروف مسبقاً
+        //  فيعمل preloader اللعبة بشكل صحيح
         // ═══════════════════════════════════════════
 
         private function loadGame(path:String):void {
@@ -236,31 +240,40 @@ package {
             stage.removeEventListener(MouseEvent.MOUSE_MOVE, onMove);
             stage.removeEventListener(MouseEvent.MOUSE_UP, onUp);
 
-            // إزالة رسائل الخطأ القديمة إن وجدت
-            if (errorTextField && contains(errorTextField)) {
-                removeChild(errorTextField);
-                errorTextField = null;
-            }
+            // تنظيف رسائل الخطأ القديمة
+            cleanupErrorUI();
 
-            // تنظيف المُحمِّل القديم بالترتيب الصحيح
-            if (swfLoader) {
-                swfLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE, onGameLoaded);
-                swfLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
-                swfLoader.unloadAndStop(true); // ← أولاً أوقف
-                if (contains(swfLoader)) removeChild(swfLoader); // ← ثم أزل
-                swfLoader = null;
-            }
+            // تنظيف المُحمِّل القديم
+            cleanupLoaders();
 
-            swfLoader = new Loader();
+            // ✅ الخطوة 1: اقرأ الملف كاملاً كـ ByteArray أولاً
+            // هذا يجعل bytesTotal = حجم الملف الحقيقي
+            // فيعمل preloader اللعبة الداخلي بشكل صحيح
+            urlLoader = new URLLoader();
+            urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
+            urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
+            urlLoader.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
+            urlLoader.load(new URLRequest(path));
+        }
 
-            // ✅ domain معزول تماماً لتجنب تعارض الكلاسات مع أي لعبة
+        private function onBytesReady(e:Event):void {
+            // تنظيف urlLoader بعد الانتهاء
+            urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
+            urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+
+            var bytes:ByteArray = urlLoader.data as ByteArray;
+            urlLoader = null;
+
+            // ✅ الخطوة 2: حمّل الـ bytes مباشرة
+            // الآن اللعبة ترى bytesTotal الصحيح = حجم الملف كاملاً
+            // فشريط التحميل الداخلي يعمل بشكل طبيعي
             var context:LoaderContext = new LoaderContext(false, new ApplicationDomain(null));
             context.allowCodeImport = true;
 
+            swfLoader = new Loader();
             swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
             swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-
-            swfLoader.load(new URLRequest(path), context);
+            swfLoader.loadBytes(bytes, context);
             addChild(swfLoader);
         }
 
@@ -270,86 +283,101 @@ package {
             var gameW:Number = info.width;
             var gameH:Number = info.height;
 
-            // إذا كانت الأبعاد صفر نستخدم أبعاد افتراضية شائعة للألعاب القديمة
+            // أبعاد افتراضية للألعاب القديمة إذا كانت صفر
             if (gameW <= 0) gameW = 550;
             if (gameH <= 0) gameH = 400;
 
             var screenW:Number = stage.stageWidth;
             var screenH:Number = stage.stageHeight;
 
-            // ✅ حساب الـ scale بناءً على الارتفاع فقط (letterbox: أسود يمين ويسار)
-            // هذا يجعل اللعبة تملأ الشاشة عمودياً وتتوسط أفقياً
+            // ✅ توسيط مع Letterbox: أسود يمين ويسار فقط
             var scale:Number = screenH / gameH;
-
-            // تأكد أن العرض لا يتجاوز الشاشة
             if (gameW * scale > screenW) {
                 scale = screenW / gameW;
             }
 
             swfLoader.scaleX = scale;
             swfLoader.scaleY = scale;
-
-            // توسيط أفقي — المساحة السوداء تكون يمين ويسار بالتساوي
             swfLoader.x = Math.round((screenW - gameW * scale) / 2);
-            // توسيط عمودي
             swfLoader.y = Math.round((screenH - gameH * scale) / 2);
-
-            // ✅ اكتشاف نوع اللعبة AVM1 أو AVM2 وتسجيله
-            if (swfLoader.content is AVM1Movie) {
-                // لعبة قديمة AS1/AS2 — تعمل تلقائياً كـ AVM1Movie
-                // لا نحتاج تدخل إضافي، AIR يتعامل معها
-            }
-            // AS3 تعمل مباشرة بدون أي معالجة إضافية
         }
 
         private function onGameError(e:IOErrorEvent):void {
-            // إزالة المُحمِّل الفاشل
-            if (swfLoader && contains(swfLoader)) {
-                removeChild(swfLoader);
-            }
+            cleanupLoaders();
+            cleanupErrorUI();
 
-            // عرض رسالة خطأ واضحة على الشاشة
-            var format:TextFormat = new TextFormat("_sans", 36, 0xFF4444, true);
+            var format:TextFormat = new TextFormat("_sans", 34, 0xFF4444, true);
             errorTextField = new TextField();
             errorTextField.defaultTextFormat = format;
             errorTextField.multiline = true;
             errorTextField.wordWrap = true;
             errorTextField.text = "فشل تحميل اللعبة\n" + e.text;
             errorTextField.width = stage.stageWidth - 80;
-            errorTextField.height = 300;
+            errorTextField.height = 200;
             errorTextField.x = 40;
             errorTextField.y = (stage.stageHeight / 2) - 150;
             errorTextField.selectable = false;
             addChild(errorTextField);
 
-            // زر العودة لمدير الملفات بعد الخطأ
             var backFormat:TextFormat = new TextFormat("_sans", 40, 0xFFFF00, true);
-            var backTf:TextField = new TextField();
-            backTf.defaultTextFormat = backFormat;
-            backTf.text = "[ اضغط هنا للعودة ]";
-            backTf.width = stage.stageWidth - 80;
-            backTf.height = 70;
-            backTf.x = 40;
-            backTf.y = (stage.stageHeight / 2) + 100;
-            backTf.selectable = false;
-            backTf.mouseEnabled = true;
-            backTf.addEventListener(MouseEvent.CLICK, onBackToMenu);
-            addChild(backTf);
+            backTextField = new TextField();
+            backTextField.defaultTextFormat = backFormat;
+            backTextField.text = "[ اضغط هنا للعودة ]";
+            backTextField.width = stage.stageWidth - 80;
+            backTextField.height = 70;
+            backTextField.x = 40;
+            backTextField.y = (stage.stageHeight / 2) + 80;
+            backTextField.selectable = false;
+            backTextField.mouseEnabled = true;
+            backTextField.addEventListener(MouseEvent.CLICK, onBackToMenu);
+            addChild(backTextField);
         }
 
         private function onBackToMenu(e:MouseEvent):void {
-            // تنظيف شاشة الخطأ
+            cleanupLoaders();
+            cleanupErrorUI();
+
+            // تنظيف كل شيء على الشاشة
             while (numChildren > 0) {
                 removeChildAt(0);
             }
-            if (swfLoader) {
-                swfLoader.unloadAndStop(true);
-                swfLoader = null;
-            }
-            errorTextField = null;
 
             // العودة لمدير الملفات
             setupFileManager();
+        }
+
+        // ═══════════════════════════════════════════
+        //  دوال مساعدة للتنظيف
+        // ═══════════════════════════════════════════
+
+        private function cleanupLoaders():void {
+            if (urlLoader) {
+                urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
+                urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+                try { urlLoader.close(); } catch (e:Error) {}
+                urlLoader = null;
+            }
+
+            if (swfLoader) {
+                swfLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE, onGameLoaded);
+                swfLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+                swfLoader.unloadAndStop(true);
+                if (contains(swfLoader)) removeChild(swfLoader);
+                swfLoader = null;
+            }
+        }
+
+        private function cleanupErrorUI():void {
+            if (errorTextField) {
+                errorTextField.removeEventListener(MouseEvent.CLICK, onBackToMenu);
+                if (contains(errorTextField)) removeChild(errorTextField);
+                errorTextField = null;
+            }
+            if (backTextField) {
+                backTextField.removeEventListener(MouseEvent.CLICK, onBackToMenu);
+                if (contains(backTextField)) removeChild(backTextField);
+                backTextField = null;
+            }
         }
     }
 }

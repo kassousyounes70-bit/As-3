@@ -49,7 +49,7 @@ jobs:
         run: amxmlc Main.as -output Main.swf
 
       - name: Generate Security Certificate
-        run: adt -certificate -validityPeriod 25 -dir CN=Nostagames 2048-RSA cert.p12 password
+        run: adt -certificate -cn Nostagames -validityPeriod 25 2048-RSA cert.p12 password
 
       - name: Package APK
         run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostagamesEngine.apk NostagamesEngine-app.xml Main.swf

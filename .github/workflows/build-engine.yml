@@ -19,25 +19,20 @@ jobs:
           java-version: '11'
           distribution: 'temurin'
 
-      - name: Download and Setup AIR SDK Manually
+      - name: Download AIR SDK 32 (Stable)
         run: |
-          $urls = @(
-              "https://airsdk.harman.com/assets/downloads/33.1.1.932/AIRSDK_Compiler.zip",
-              "https://airdownload.adobe.com/air/win/download/32.0/AIRSDK_Compiler.zip"
-          )
+          $adobeUrl = "https://airdownload.adobe.com/air/win/download/32.0/AIRSDK_Compiler.zip"
+          Write-Host "Downloading Adobe AIR SDK 32.0 via cURL..."
           
-          foreach ($url in $urls) {
-              try {
-                  Write-Host "Attempting to download from: $url"
-                  Invoke-WebRequest -Uri $url -OutFile "airsdk.zip" -ErrorAction Stop
-                  Write-Host "Download successful!"
-                  break
-              } catch {
-                  Write-Host "Download failed from this URL, trying fallback..."
-              }
+          # استخدام curl بدلاً من Invoke-WebRequest لضمان عدم التعليق
+          curl.exe -L -o airsdk.zip $adobeUrl
+          
+          if (!(Test-Path "airsdk.zip")) {
+              Write-Host "Critical Error: Download failed."
+              exit 1
           }
           
-          Write-Host "Extracting archive..."
+          Write-Host "Extracting archive (This will take ~1 minute)..."
           Expand-Archive -Path "airsdk.zip" -DestinationPath "airsdk" -Force
           
           Write-Host "Injecting compiler paths to system environment..."

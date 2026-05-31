@@ -13,7 +13,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java 11 (Strict Requirement for AIR SDK)
+      - name: Setup Java 11
         uses: actions/setup-java@v4
         with:
           java-version: '11'
@@ -28,19 +28,19 @@ jobs:
           
           foreach ($url in $urls) {
               try {
-                  Write-Host "جاري محاولة التحميل من: $url"
+                  Write-Host "Attempting to download from: $url"
                   Invoke-WebRequest -Uri $url -OutFile "airsdk.zip" -ErrorAction Stop
-                  Write-Host "✅ تم التحميل بنجاح!"
+                  Write-Host "Download successful!"
                   break
               } catch {
-                  Write-Host "❌ فشل التحميل من هذا الرابط، جاري تجربة الرابط البديل..."
+                  Write-Host "Download failed from this URL, trying fallback..."
               }
           }
           
-          Write-Host "جاري فك الضغط (قد يستغرق بعض الوقت)..."
+          Write-Host "Extracting archive..."
           Expand-Archive -Path "airsdk.zip" -DestinationPath "airsdk" -Force
           
-          Write-Host "حقن مسارات المترجم في بيئة النظام..."
+          Write-Host "Injecting compiler paths to system environment..."
           $binPath = "$((Get-Item .).FullName)\airsdk\bin"
           echo "$binPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
@@ -56,7 +56,7 @@ jobs:
       - name: Generate Security Certificate
         run: adt -certificate -validityPeriod 25 -dir CN=Nostagames 2048-RSA cert.p12 password
 
-      - name: Package APK (Captive Runtime)
+      - name: Package APK
         run: adt -package -target apk-captive-runtime -storetype pkcs12 -keystore cert.p12 -storepass password NostagamesEngine.apk NostagamesEngine-app.xml Main.swf
 
       - name: Upload Artifact

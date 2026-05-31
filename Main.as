@@ -14,6 +14,8 @@ package {
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
     import flash.filesystem.File;
+    import flash.filesystem.FileStream;
+    import flash.filesystem.FileMode;
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
@@ -28,8 +30,10 @@ package {
         private var errorTextField:TextField;
         private var backTextField:TextField;
 
-        // مسار اللعبة الحالية — نحتاجه للـ SharedObject
-        private var currentGamePath:String;
+        // الملف المؤقت الثابت — اسمه لا يتغير أبداً
+        // هذا هو سر حل مشكلة SharedObject
+        private static const TEMP_SWF_NAME:String = "current_game.swf";
+        private var tempSWFFile:File;
 
         // متغيرات السحب والتمرير
         private var isDragging:Boolean = false;
@@ -55,6 +59,11 @@ package {
         private function init():void {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
+
+            // تحديد مسار الملف المؤقت الثابت
+            // File.applicationStorageDirectory = مجلد خاص بالتطبيق دائماً موجود
+            tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
+
             setupFileManager();
         }
 
@@ -216,36 +225,39 @@ package {
                     currentDir = f;
                     renderDirectory(currentDir);
                 } else {
-                    loadGame(f.url, f.nativePath);
+                    loadGame(f.url);
                 }
             }
         }
 
         // ═══════════════════════════════════════════
-        //  تشغيل اللعبة
+        //  تشغيل اللعبة — الحل المزدوج
         //
-        //  ✅ حل مشكلة الـ Preloader:
-        //     URLLoader يقرأ الملف كاملاً أولاً كـ ByteArray
-        //     ثم loadBytes() — يجعل bytesTotal صحيحاً
-        //     فيعمل شريط التحميل الداخلي للعبة
+        //  المشكلة:
+        //  ┌─────────────────────────────────────────┐
+        //  │ loadBytes() ← pseudo-URL يتغير كل جلسة │
+        //  │ → SharedObject يُفقد عند إغلاق التطبيق │
+        //  │                                         │
+        //  │ load() مباشر ← bytesTotal = 0           │
+        //  │ → preloader اللعبة لا يكتمل أبداً      │
+        //  └─────────────────────────────────────────┘
         //
-        //  ✅ حل مشكلة الحفظ (SharedObject):
-        //     نحفظ currentGamePath ونمرره كـ localPath
-        //     للـ SharedObject داخل اللعبة عبر workaround
-        //     الحل الحقيقي: نجعل اللعبة ترى URL ثابت دائماً
-        //     عبر ApplicationDomain.currentDomain بدل null
-        //     هذا يعطي pseudo-URL ثابت مبني على مسار الملف
-        //
-        //  ✅ حل مشكلة السرعة:
-        //     بعد التحميل نقرأ frameRate اللعبة
-        //     ونضبط stage.frameRate عليه تلقائياً
+        //  الحل المزدوج:
+        //  ┌─────────────────────────────────────────┐
+        //  │ 1. URLLoader يقرأ bytes اللعبة          │
+        //  │    → يحل bytesTotal للـ preloader       │
+        //  │                                         │
+        //  │ 2. نكتب الـ bytes في ملف مؤقت ثابت     │
+        //  │    الاسم: "current_game.swf" دائماً     │
+        //  │    → URL ثابت لا يتغير أبداً            │
+        //  │                                         │
+        //  │ 3. load() من الملف المؤقت الثابت        │
+        //  │    → SharedObject يُحفظ ويُسترجع ✅     │
+        //  │    → preloader يعمل لأن الملف محلي ✅   │
+        //  └─────────────────────────────────────────┘
         // ═══════════════════════════════════════════
 
-        private function loadGame(url:String, nativePath:String):void {
-            // حفظ المسار للاستخدام لاحقاً
-            currentGamePath = nativePath;
-
-            // إخفاء مدير الملفات
+        private function loadGame(url:String):void {
             if (uiContainer && contains(uiContainer)) {
                 removeChild(uiContainer);
             }
@@ -257,8 +269,7 @@ package {
             cleanupErrorUI();
             cleanupLoaders();
 
-            // ✅ الخطوة 1: اقرأ الملف كاملاً كـ ByteArray
-            // هذا يحل مشكلة bytesTotal = 0 وشريط التحميل
+            // الخطوة 1: اقرأ ملف اللعبة كاملاً كـ ByteArray
             urlLoader = new URLLoader();
             urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
             urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
@@ -273,17 +284,35 @@ package {
             var bytes:ByteArray = urlLoader.data as ByteArray;
             urlLoader = null;
 
-            // ✅ الخطوة 2: loadBytes مع ApplicationDomain.currentDomain
-            //
-            // لماذا currentDomain وليس new ApplicationDomain(null)؟
-            // لأن new ApplicationDomain(null) يعطي pseudo-URL عشوائي
-            // يتغير في كل جلسة — فالـ SharedObject يُفقد عند إغلاق التطبيق
-            //
-            // currentDomain يعطي pseudo-URL مبني على مسار الملف الأصلي
-            // فيبقى ثابتاً بين الجلسات — الحفظ يعمل بشكل صحيح
-            //
-            // للحماية من تعارض الكلاسات: نستخدم try/catch في onGameLoaded
+            // الخطوة 2: اكتب الـ bytes في الملف المؤقت الثابت
+            // "current_game.swf" — نفس الاسم دائماً لكل لعبة
+            // هذا يضمن أن الـ SharedObject يجد نفس المسار في كل جلسة
+            try {
+                var stream:FileStream = new FileStream();
+                stream.open(tempSWFFile, FileMode.WRITE);
+                stream.writeBytes(bytes);
+                stream.close();
+            } catch (writeError:Error) {
+                // إذا فشل الكتابة نحاول loadBytes كبديل
+                loadViaBytes(bytes);
+                return;
+            }
 
+            // الخطوة 3: حمّل من الملف المؤقت الثابت
+            // الآن اللعبة ترى URL ثابت: app-storage:/current_game.swf
+            // هذا URL لا يتغير أبداً بين الجلسات
+            var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
+            context.allowCodeImport = true;
+
+            swfLoader = new Loader();
+            swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
+            swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
+            swfLoader.load(new URLRequest(tempSWFFile.url), context);
+            addChild(swfLoader);
+        }
+
+        // بديل احتياطي إذا فشل الكتابة للملف المؤقت
+        private function loadViaBytes(bytes:ByteArray):void {
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
@@ -297,19 +326,14 @@ package {
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
 
-            // ✅ حل مشكلة السرعة:
-            // نقرأ frameRate اللعبة الأصلي ونطبقه على الـ stage
-            // أغلب ألعاب الفلاش القديمة: 24fps أو 30fps
-            // مشروعنا: 60fps — لذلك تبدو سريعة جداً
+            // ✅ ضبط سرعة اللعبة تلقائياً حسب frameRate الأصلي
             var gameFrameRate:Number = info.frameRate;
             if (gameFrameRate > 0 && gameFrameRate <= 60) {
                 stage.frameRate = gameFrameRate;
             }
 
-            // أبعاد اللعبة
             var gameW:Number = info.width;
             var gameH:Number = info.height;
-
             if (gameW <= 0) gameW = 550;
             if (gameH <= 0) gameH = 400;
 
@@ -331,8 +355,6 @@ package {
         private function onGameError(e:IOErrorEvent):void {
             cleanupLoaders();
             cleanupErrorUI();
-
-            // إعادة frameRate الأصلي عند الخطأ
             stage.frameRate = 60;
 
             var format:TextFormat = new TextFormat("_sans", 34, 0xFF4444, true);
@@ -365,15 +387,12 @@ package {
         private function onBackToMenu(e:MouseEvent):void {
             cleanupLoaders();
             cleanupErrorUI();
-
-            // إعادة frameRate الأصلي عند العودة للقائمة
             stage.frameRate = 60;
 
             while (numChildren > 0) {
                 removeChildAt(0);
             }
 
-            currentGamePath = null;
             setupFileManager();
         }
 

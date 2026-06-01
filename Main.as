@@ -16,7 +16,6 @@ package {
     import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
-    import flash.system.Security;
     import flash.filesystem.File;
     import flash.filesystem.FileStream;
     import flash.filesystem.FileMode;
@@ -66,9 +65,6 @@ package {
         private function init():void {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
-
-            Security.allowDomain("*");
-            Security.allowInsecureDomain("*");
 
             if (File.permissionStatus != PermissionStatus.GRANTED) {
                 var permFile:File = new File("/storage/emulated/0");

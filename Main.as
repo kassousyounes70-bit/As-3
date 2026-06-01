@@ -10,18 +10,22 @@ package {
     import flash.events.MouseEvent;
     import flash.events.PermissionEvent;
     import flash.events.ServerSocketConnectEvent;
+    import flash.events.TimerEvent;
     import flash.net.URLRequest;
     import flash.net.ServerSocket;
     import flash.net.Socket;
     import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
+    import flash.system.Security;
     import flash.filesystem.File;
     import flash.filesystem.FileStream;
     import flash.filesystem.FileMode;
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
+    import flash.utils.Timer;
+    import flash.utils.setTimeout;
     import flash.desktop.NativeApplication;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
@@ -66,6 +70,9 @@ package {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
 
+            Security.allowDomain("*");
+            Security.allowInsecureDomain("*");
+
             if (File.permissionStatus != PermissionStatus.GRANTED) {
                 var permFile:File = new File("/storage/emulated/0");
                 permFile.addEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
@@ -89,7 +96,7 @@ package {
                 logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
             }
 
-            log("=== Nostagames Server Engine V2 Started ===");
+            log("=== Nostagames Server Engine Throttled Started ===");
 
             startLocalServer();
             setupExitButton();
@@ -195,8 +202,43 @@ package {
                                         "Connection: keep-alive\r\n\r\n";
 
                     client.writeUTFBytes(header);
-                    client.writeBytes(bytes);
                     client.flush();
+
+                    if (ext == "swf") {
+                        var totalChunks:int = 10;
+                        var chunkSize:uint = Math.ceil(bytes.length / totalChunks);
+                        var currentChunk:int = 0;
+                        
+                        var t:Timer = new Timer(1000, totalChunks);
+                        t.addEventListener(TimerEvent.TIMER, function(te:TimerEvent):void {
+                            try {
+                                if (!client.connected) {
+                                    t.stop();
+                                    return;
+                                }
+                                var startPos:uint = currentChunk * chunkSize;
+                                var sendSize:uint = chunkSize;
+                                if (startPos + sendSize > bytes.length) {
+                                    sendSize = bytes.length - startPos;
+                                }
+                                if (sendSize > 0) {
+                                    client.writeBytes(bytes, startPos, sendSize);
+                                    client.flush();
+                                }
+                                currentChunk++;
+                            } catch(e:Error) {
+                                t.stop();
+                            }
+                        });
+                        t.addEventListener(TimerEvent.TIMER_COMPLETE, function(te:TimerEvent):void {
+                            setTimeout(closeClientSocket, 1500, client);
+                        });
+                        t.start();
+                    } else {
+                        client.writeBytes(bytes);
+                        client.flush();
+                        setTimeout(closeClientSocket, 1500, client);
+                    }
                 } else {
                     log("404 Not Found: " + reqPath);
                     var notFound:String = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
@@ -207,6 +249,14 @@ package {
             } catch (err:Error) {
                 log("Socket Error: " + err.message);
             }
+        }
+
+        private function closeClientSocket(client:Socket):void {
+            try {
+                if (client && client.connected) {
+                    client.close();
+                }
+            } catch(e:Error) {}
         }
 
         private function onClientClose(e:Event):void {

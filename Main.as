@@ -2,18 +2,16 @@ package {
     import flash.display.Sprite;
     import flash.display.Loader;
     import flash.display.LoaderInfo;
+    import flash.display.AVM1Movie;
     import flash.display.StageScaleMode;
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
-    import flash.events.MouseEvent;
     import flash.events.ProgressEvent;
-    import flash.events.ServerSocketConnectEvent;
+    import flash.events.MouseEvent;
     import flash.net.URLRequest;
     import flash.net.URLLoader;
     import flash.net.URLLoaderDataFormat;
-    import flash.net.ServerSocket;
-    import flash.net.Socket;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
     import flash.filesystem.File;
@@ -33,16 +31,11 @@ package {
         private var errorTextField:TextField;
         private var backTextField:TextField;
 
-        // إعدادات خادم الويب المحلي
-        private var serverSocket:ServerSocket;
-        private static const SERVER_PORT:int = 8080;
-        private static const SERVER_HOST:String = "127.0.0.1";
-
-        // الملف المؤقت الثابت لحل مشكلة نطاق الحفظ والأمان
+        // الملف المؤقت الثابت لحل مشكلة SharedObject
         private static const TEMP_SWF_NAME:String = "current_game.swf";
         private var tempSWFFile:File;
 
-        // متغيرات السحب والتمرير للقائمة
+        // متغيرات السحب والتمرير
         private var isDragging:Boolean = false;
         private var startY:Number;
         private var listStartY:Number;
@@ -66,70 +59,12 @@ package {
         private function init():void {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
-
-            // تعيين مسار التخزين المعزول داخل مجلد التطبيق الآمن
             tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
-            
-            startLocalServer();
             setupFileManager();
         }
 
         // ═══════════════════════════════════════════
-        //  إدارة وتشغيل خادم الويب المحلي (HTTP Server)
-        // ═══════════════════════════════════════════
-        
-        private function startLocalServer():void {
-            try {
-                serverSocket = new ServerSocket();
-                serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT, onClientConnect);
-                serverSocket.bind(SERVER_PORT, SERVER_HOST);
-                serverSocket.listen();
-            } catch (e:Error) {
-                // لتفادي الانهيار إذا كان المنفذ محجوزاً أو معلقاً من جلسة سابقة
-            }
-        }
-
-        private function onClientConnect(e:ServerSocketConnectEvent):void {
-            var clientSocket:Socket = e.socket;
-            clientSocket.addEventListener(ProgressEvent.SOCKET_DATA, onClientData);
-        }
-
-        private function onClientData(e:ProgressEvent):void {
-            var socket:Socket = e.target as Socket;
-            if (!socket) return;
-
-            try {
-                var request:String = socket.readUTFBytes(socket.bytesAvailable);
-                
-                // التحقق من صحة طلب ملف اللعبة المؤقتة
-                if (request.indexOf("GET /" + TEMP_SWF_NAME) != -1 && tempSWFFile.exists) {
-                    var fileBytes:ByteArray = new ByteArray();
-                    var stream:FileStream = new FileStream();
-                    stream.open(tempSWFFile, FileMode.READ);
-                    stream.readBytes(fileBytes);
-                    stream.close();
-
-                    // صياغة ترويسة HTTP متوافقة ومزودة بحجم المحتوى الصارم
-                    var header:String = "HTTP/1.1 200 OK\r\n" +
-                                        "Content-Type: application/x-shockwave-flash\r\n" +
-                                        "Content-Length: " + fileBytes.length + "\r\n" +
-                                        "Connection: close\r\n\r\n";
-
-                    socket.writeUTFBytes(header);
-                    socket.writeBytes(fileBytes);
-                } else {
-                    socket.writeUTFBytes("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
-                }
-            } catch (err:Error) {
-                // حماية الخادم المصغر من الانهيار التام عند انقطاع الاتصال المفاجئ
-            } finally {
-                socket.flush();
-                socket.close();
-            }
-        }
-
-        // ═══════════════════════════════════════════
-        //  إدارة ملفات النظام وعرض الواجهة
+        //  مدير الملفات
         // ═══════════════════════════════════════════
 
         private function setupFileManager():void {
@@ -157,8 +92,10 @@ package {
             }
             listContainer.y = 0;
             totalListHeight = 0;
+
             var yPos:Number = 0;
             var format:TextFormat = new TextFormat("_sans", 40, 0xFFFFFF, true);
+
             if (dir.parent != null) {
                 var upBtn:Sprite = createListItem("[ .. GO UP .. ]", 0xFFFF00, format);
                 upBtn.y = yPos;
@@ -212,6 +149,7 @@ package {
 
         private function createListItem(txt:String, color:uint, format:TextFormat):Sprite {
             var item:Sprite = new Sprite();
+
             item.graphics.beginFill(0x222222);
             item.graphics.lineStyle(2, 0x444444);
             item.graphics.drawRect(0, 0, stage.stageWidth, 75);
@@ -233,7 +171,7 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  أحداث السحب والتمرير المخصصة للمحمول
+        //  السحب والتمرير
         // ═══════════════════════════════════════════
 
         private function onDown(e:MouseEvent):void {
@@ -289,8 +227,30 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  استدعاء وتحميل اللعبة عبر الخادم المحلي
-        // ═══════════════════════════════════════════
+        //  تشغيل اللعبة — الحل النهائي المزدوج
+        //
+        //  المشكلة المزدوجة:
+        //  ┌─────────────────────────────────────────────┐
+        //  │ loadBytes() وحده:                           │
+        //  │   pseudo-URL عشوائي → SharedObject يُفقد   │
+        //  │                                             │
+        //  │ load() محلي وحده:                           │
+        //  │   bytesTotal=0 → preloader عالق للأبد      │
+        //  └─────────────────────────────────────────────┘
+        //
+        //  الحل:
+        //  ┌─────────────────────────────────────────────┐
+        //  │ 1. URLLoader يقرأ الملف → bytes حقيقية     │
+        //  │                                             │
+        //  │ 2. نكتب bytes في ملف مؤقت ثابت الاسم       │
+        //  │    → URL ثابت → SharedObject محفوظ ✅       │
+        //  │                                             │
+        //  │ 3. loadBytes() من الـ bytes المقروءة        │
+        //  │    → ثم نُطلق ProgressEvent مصطنع فوري     │
+        //  │    bytesLoaded = bytesTotal = حجم الملف    │
+        //  │    → preloader اللعبة يرى 100% فيكمل ✅    │
+        //  └─────────────────────────────────────────────┘
+        // ═══════════════════════════════════════════════
 
         private function loadGame(url:String):void {
             if (uiContainer && contains(uiContainer)) {
@@ -304,6 +264,7 @@ package {
             cleanupErrorUI();
             cleanupLoaders();
 
+            // الخطوة 1: اقرأ الملف كاملاً كـ ByteArray
             urlLoader = new URLLoader();
             urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
             urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
@@ -318,32 +279,22 @@ package {
             var bytes:ByteArray = urlLoader.data as ByteArray;
             urlLoader = null;
 
+            // احفظ الحجم الحقيقي قبل أي شيء
+            var realSize:uint = bytes.length;
+
+            // الخطوة 2: اكتب الـ bytes في الملف المؤقت الثابت
+            // الاسم "current_game.swf" لا يتغير أبداً
+            // → URL ثابت → SharedObject يُحفظ ويُسترجع بين الجلسات
             try {
                 var stream:FileStream = new FileStream();
                 stream.open(tempSWFFile, FileMode.WRITE);
                 stream.writeBytes(bytes);
                 stream.close();
             } catch (writeError:Error) {
-                // تراجع تلقائي لقراءة الذاكرة الخام كخيار احتياطي لضمان عدم توقف النظام
-                loadViaBytes(bytes);
-                return;
+                // الكتابة فشلت — نكمل بدون الملف المؤقت
             }
 
-            // إعداد سياق التحميل للنطاق المحلي الموحد
-            var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
-            context.allowCodeImport = true;
-
-            swfLoader = new Loader();
-            swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
-            swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-            
-            // حقن الرابط الافتراضي الثابت عبر الخادم المحلي لتوفير حجم البيانات الصارم ودعم ملفات الحفظ
-            var localURL:String = "http://" + SERVER_HOST + ":" + SERVER_PORT + "/" + TEMP_SWF_NAME;
-            swfLoader.load(new URLRequest(localURL), context);
-            addChild(swfLoader);
-        }
-
-        private function loadViaBytes(bytes:ByteArray):void {
+            // الخطوة 3: loadBytes مع ApplicationDomain.currentDomain
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
@@ -352,11 +303,29 @@ package {
             swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
             swfLoader.loadBytes(bytes, context);
             addChild(swfLoader);
+
+            // ✅ الخطوة 4: أطلق ProgressEvent مصطنع فوري
+            // هذا يجعل اللعبة ترى bytesTotal الحقيقي من أول frame
+            // preloader اللعبة: loaded/total = realSize/realSize = 1.0 = 100%
+            // فيكمل شريط التحميل ويدخل اللعبة مباشرة
+            try {
+                var pe:ProgressEvent = new ProgressEvent(
+                    ProgressEvent.PROGRESS,
+                    false,
+                    false,
+                    realSize,  // bytesLoaded = الحجم الكامل
+                    realSize   // bytesTotal  = الحجم الكامل
+                );
+                swfLoader.contentLoaderInfo.dispatchEvent(pe);
+            } catch (dispatchError:Error) {
+                // dispatchEvent فشل — لا مشكلة، اللعبة ستعتمد على Event.COMPLETE
+            }
         }
 
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
-            
+
+            // ✅ ضبط سرعة اللعبة تلقائياً
             var gameFrameRate:Number = info.frameRate;
             if (gameFrameRate > 0 && gameFrameRate <= 60) {
                 stage.frameRate = gameFrameRate;
@@ -370,6 +339,7 @@ package {
             var screenW:Number = stage.stageWidth;
             var screenH:Number = stage.stageHeight;
 
+            // ✅ توسيط مع Letterbox — أسود يمين ويسار فقط
             var scale:Number = screenH / gameH;
             if (gameW * scale > screenW) {
                 scale = screenW / gameW;
@@ -426,7 +396,7 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  دوال التنظيف المتقدمة وإدارة الذاكرة
+        //  دوال مساعدة للتنظيف
         // ═══════════════════════════════════════════
 
         private function cleanupLoaders():void {

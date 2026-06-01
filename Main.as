@@ -16,13 +16,13 @@ package {
     import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
+    import flash.system.Security;
     import flash.filesystem.File;
     import flash.filesystem.FileStream;
     import flash.filesystem.FileMode;
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
-    import flash.utils.setTimeout;
     import flash.desktop.NativeApplication;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
@@ -67,6 +67,9 @@ package {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
 
+            Security.allowDomain("*");
+            Security.allowInsecureDomain("*");
+
             if (File.permissionStatus != PermissionStatus.GRANTED) {
                 var permFile:File = new File("/storage/emulated/0");
                 permFile.addEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
@@ -90,7 +93,7 @@ package {
                 logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
             }
 
-            log("=== Nostagames Server Engine Started ===");
+            log("=== Nostagames Server Engine V2 Started ===");
 
             startLocalServer();
             setupExitButton();
@@ -124,8 +127,6 @@ package {
                 } catch (e:Error) {
                     log("Server failed to bind: " + e.message);
                 }
-            } else {
-                log("ServerSocket not supported on this device.");
             }
         }
 
@@ -141,58 +142,75 @@ package {
             var client:Socket = e.target as Socket;
             try {
                 var requestStr:String = client.readUTFBytes(client.bytesAvailable);
+                var lines:Array = requestStr.split("\n");
+                var firstLine:String = lines[0];
                 
-                if (requestStr.indexOf("GET") != -1) {
-                    
-                    if (requestStr.indexOf("crossdomain.xml") != -1) {
-                        var crossdomain:String = '<?xml version="1.0"?><cross-domain-policy><allow-access-from domain="*" /></cross-domain-policy>';
-                        var cHeader:String = "HTTP/1.1 200 OK\r\n" +
-                                             "Content-Type: text/xml\r\n" +
-                                             "Content-Length: " + crossdomain.length + "\r\n" +
-                                             "Connection: close\r\n\r\n";
-                        client.writeUTFBytes(cHeader);
-                        client.writeUTFBytes(crossdomain);
-                        client.flush();
-                        setTimeout(closeClientSocket, 500, client);
-                        return;
+                log("Req: " + firstLine);
+
+                var pathMatch:Array = firstLine.match(/GET\s+\/([^\s\?]*)/);
+                if (!pathMatch) return;
+                
+                var reqPath:String = decodeURIComponent(pathMatch[1]);
+                if (reqPath == "" && servingFile) reqPath = servingFile.name;
+
+                if (reqPath == "crossdomain.xml") {
+                    var crossdomain:String = '<?xml version="1.0"?><cross-domain-policy><allow-access-from domain="*" /></cross-domain-policy>';
+                    var cHeader:String = "HTTP/1.1 200 OK\r\n" +
+                                         "Content-Type: text/xml\r\n" +
+                                         "Content-Length: " + crossdomain.length + "\r\n" +
+                                         "Connection: keep-alive\r\n\r\n";
+                    client.writeUTFBytes(cHeader);
+                    client.writeUTFBytes(crossdomain);
+                    client.flush();
+                    return;
+                }
+
+                var targetFile:File = null;
+                if (servingFile && (reqPath == servingFile.name || reqPath == encodeURIComponent(servingFile.name))) {
+                    targetFile = servingFile;
+                } else if (servingFile && servingFile.parent) {
+                    try {
+                        targetFile = servingFile.parent.resolvePath(reqPath);
+                    } catch(err:Error) {
+                        targetFile = null;
                     }
+                }
 
-                    if (servingFile && servingFile.exists) {
-                        var fs:FileStream = new FileStream();
-                        fs.open(servingFile, FileMode.READ);
-                        var bytes:ByteArray = new ByteArray();
-                        fs.readBytes(bytes);
-                        fs.close();
+                if (targetFile && targetFile.exists && !targetFile.isDirectory) {
+                    var fs:FileStream = new FileStream();
+                    fs.open(targetFile, FileMode.READ);
+                    var bytes:ByteArray = new ByteArray();
+                    fs.readBytes(bytes);
+                    fs.close();
 
-                        var header:String = "HTTP/1.0 200 OK\r\n" +
-                                            "Content-Type: application/x-shockwave-flash\r\n" +
-                                            "Content-Length: " + bytes.length + "\r\n" +
-                                            "Access-Control-Allow-Origin: *\r\n" +
-                                            "Connection: close\r\n\r\n";
+                    var ext:String = targetFile.extension ? targetFile.extension.toLowerCase() : "";
+                    var contentType:String = "application/octet-stream";
+                    if (ext == "swf") contentType = "application/x-shockwave-flash";
+                    else if (ext == "xml") contentType = "text/xml";
+                    else if (ext == "png") contentType = "image/png";
+                    else if (ext == "jpg" || ext == "jpeg") contentType = "image/jpeg";
+                    else if (ext == "json") contentType = "application/json";
+                    else if (ext == "txt") contentType = "text/plain";
 
-                        client.writeUTFBytes(header);
-                        client.writeBytes(bytes);
-                        client.flush();
-                        
-                        setTimeout(closeClientSocket, 1500, client);
-                    } else {
-                        var notFound:String = "HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n";
-                        client.writeUTFBytes(notFound);
-                        client.flush();
-                        setTimeout(closeClientSocket, 500, client);
-                    }
+                    var header:String = "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: " + contentType + "\r\n" +
+                                        "Content-Length: " + bytes.length + "\r\n" +
+                                        "Access-Control-Allow-Origin: *\r\n" +
+                                        "Connection: keep-alive\r\n\r\n";
+
+                    client.writeUTFBytes(header);
+                    client.writeBytes(bytes);
+                    client.flush();
+                } else {
+                    log("404 Not Found: " + reqPath);
+                    var notFound:String = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+                    client.writeUTFBytes(notFound);
+                    client.flush();
+                    try { client.close(); } catch(e:Error) {}
                 }
             } catch (err:Error) {
-                log("Socket Read Error: " + err.message);
+                log("Socket Error: " + err.message);
             }
-        }
-
-        private function closeClientSocket(client:Socket):void {
-            try {
-                if (client && client.connected) {
-                    client.close();
-                }
-            } catch(e:Error) {}
         }
 
         private function onClientClose(e:Event):void {
@@ -238,7 +256,7 @@ package {
             tf.mouseEnabled = false;
             exitButton.addChild(tf);
             
-            exitButton.x = stage.stageWidth - 90;
+            exitButton.x = stage.stageWidth > 0 ? stage.stageWidth - 90 : 1190;
             exitButton.y = 10;
             exitButton.mouseChildren = false;
             exitButton.mouseEnabled = true;

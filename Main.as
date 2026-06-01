@@ -6,13 +6,13 @@ package {
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
-    import flash.events.ProgressEvent;
     import flash.events.MouseEvent;
     import flash.events.PermissionEvent;
-    import flash.events.ServerSocketConnectEvent;
+    import flash.events.TimerEvent;
     import flash.net.URLRequest;
-    import flash.net.ServerSocket;
-    import flash.net.Socket;
+    import flash.net.URLLoader;
+    import flash.net.URLLoaderDataFormat;
+    import flash.net.SharedObject;
     import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
@@ -22,17 +22,23 @@ package {
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
+    import flash.utils.Timer;
     import flash.desktop.NativeApplication;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
     public class Main extends Sprite {
         private var swfLoader:Loader;
+        private var urlLoader:URLLoader;
         private var uiContainer:Sprite;
         private var listContainer:Sprite;
         private var currentDir:File;
         private var errorTextField:TextField;
         private var backTextField:TextField;
         private var exitButton:Sprite;
+        private var savingOverlay:Sprite;
+        
+        private var logFile:File;
+        private var logLines:Array = [];
         
         private var isDragging:Boolean = false;
         private var startY:Number;
@@ -41,10 +47,10 @@ package {
         private var hasMoved:Boolean = false;
         private var totalListHeight:Number = 0;
 
-        private var serverSocket:ServerSocket;
-        private var activeSockets:Vector.<Socket> = new Vector.<Socket>();
-        private var servingFile:File;
-        private const SERVER_PORT:int = 8765;
+        private var savesDir:File;
+        private var soMasterDir:File;
+        private var currentGameId:String;
+        private var isProcessingExit:Boolean = false;
 
         public function Main() {
             if (stage) {
@@ -78,78 +84,101 @@ package {
         }
 
         private function onPermissionGranted():void {
-            startLocalServer();
+            try {
+                var logDir:File = new File("/storage/emulated/0/nostagames");
+                if (!logDir.exists) logDir.createDirectory();
+                logFile = logDir.resolvePath("nostagames_log.txt");
+            } catch (e:Error) {
+                logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
+            }
+
+            initSOMaster();
+            createSavingIndicator();
             setupExitButton();
             setupFileManager();
         }
 
-        private function startLocalServer():void {
-            if (ServerSocket.isSupported) {
+        private function initSOMaster():void {
+            savesDir = File.applicationStorageDirectory.resolvePath("NostaSaves");
+            if (!savesDir.exists) savesDir.createDirectory();
+            
+            soMasterDir = File.applicationStorageDirectory.resolvePath("#SharedObjects");
+            if (!soMasterDir.exists) soMasterDir.createDirectory();
+        }
+
+        private function backupSave():void {
+            if (!soMasterDir || !currentGameId) return;
+            var gameSaveDir:File = savesDir.resolvePath(currentGameId);
+            if (!gameSaveDir.exists) gameSaveDir.createDirectory();
+            copyDir(soMasterDir, gameSaveDir);
+        }
+
+        private function restoreSave():void {
+            if (!soMasterDir || !currentGameId) return;
+            clearDir(soMasterDir);
+            var gameSaveDir:File = savesDir.resolvePath(currentGameId);
+            if (gameSaveDir.exists) {
+                copyDir(gameSaveDir, soMasterDir);
+            }
+        }
+
+        private function clearDir(dir:File):void {
+            if (!dir.exists || !dir.isDirectory) return;
+            var items:Array = dir.getDirectoryListing();
+            for each (var item:File in items) {
                 try {
-                    serverSocket = new ServerSocket();
-                    serverSocket.bind(SERVER_PORT, "127.0.0.1");
-                    serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT, onClientConnect);
-                    serverSocket.listen();
-                } catch (e:Error) {}
+                    if (item.isDirectory) item.deleteDirectory(true);
+                    else item.deleteFile();
+                } catch(e:Error) {}
             }
         }
 
-        private function onClientConnect(e:ServerSocketConnectEvent):void {
-            var client:Socket = e.socket;
-            activeSockets.push(client);
-            client.addEventListener(ProgressEvent.SOCKET_DATA, onClientData);
-            client.addEventListener(Event.CLOSE, onClientClose);
-            client.addEventListener(IOErrorEvent.IO_ERROR, onClientError);
-        }
-
-        private function onClientData(e:ProgressEvent):void {
-            var client:Socket = e.target as Socket;
-            try {
-                var requestStr:String = client.readUTFBytes(client.bytesAvailable);
-                
-                if (requestStr.indexOf("GET") != -1) {
-                    if (servingFile && servingFile.exists) {
-                        var fs:FileStream = new FileStream();
-                        fs.open(servingFile, FileMode.READ);
-                        var bytes:ByteArray = new ByteArray();
-                        fs.readBytes(bytes);
-                        fs.close();
-
-                        var header:String = "HTTP/1.1 200 OK\r\n" +
-                                            "Content-Type: application/x-shockwave-flash\r\n" +
-                                            "Content-Length: " + bytes.length + "\r\n" +
-                                            "Access-Control-Allow-Origin: *\r\n" +
-                                            "Connection: close\r\n\r\n";
-
-                        client.writeUTFBytes(header);
-                        client.writeBytes(bytes);
-                        client.flush();
-                    } else {
-                        client.writeUTFBytes("HTTP/1.1 404 Not Found\r\n\r\n");
-                        client.flush();
-                    }
-                    client.close();
+        private function copyDir(src:File, dst:File):void {
+            if (!src.exists) return;
+            if (!dst.exists) dst.createDirectory();
+            var items:Array = src.getDirectoryListing();
+            for each (var item:File in items) {
+                var destItem:File = dst.resolvePath(item.name);
+                if (item.isDirectory) {
+                    copyDir(item, destItem);
+                } else {
+                    item.copyTo(destItem, true);
                 }
-            } catch (err:Error) {}
-        }
-
-        private function onClientClose(e:Event):void {
-            removeSocket(e.target as Socket);
-        }
-
-        private function onClientError(e:IOErrorEvent):void {
-            removeSocket(e.target as Socket);
-        }
-
-        private function removeSocket(client:Socket):void {
-            if (!client) return;
-            client.removeEventListener(ProgressEvent.SOCKET_DATA, onClientData);
-            client.removeEventListener(Event.CLOSE, onClientClose);
-            client.removeEventListener(IOErrorEvent.IO_ERROR, onClientError);
-            var index:int = activeSockets.indexOf(client);
-            if (index != -1) {
-                activeSockets.splice(index, 1);
             }
+        }
+
+        private function log(msg:String):void {
+            var now:Date = new Date();
+            logLines.push("[" + now.toTimeString().substr(0, 8) + "] " + msg);
+            flushLog();
+        }
+
+        private function flushLog():void {
+            if (!logFile) return;
+            try {
+                var s:FileStream = new FileStream();
+                s.open(logFile, FileMode.WRITE);
+                s.writeUTFBytes(logLines.join("\n") + "\n");
+                s.close();
+            } catch (e:Error) {}
+        }
+
+        private function createSavingIndicator():void {
+            savingOverlay = new Sprite();
+            savingOverlay.graphics.beginFill(0x000000, 0.85);
+            savingOverlay.graphics.drawRect(0, 0, 2000, 2000);
+            savingOverlay.graphics.endFill();
+
+            var tf:TextField = new TextField();
+            var fmt:TextFormat = new TextFormat("_sans", 50, 0x00FF00, true);
+            fmt.align = "center";
+            tf.defaultTextFormat = fmt;
+            tf.text = "SAVING PROGRESS... PLEASE WAIT";
+            tf.width = 1280;
+            tf.height = 100;
+            tf.y = 300;
+            tf.selectable = false;
+            savingOverlay.addChild(tf);
         }
 
         private function setupExitButton():void {
@@ -192,8 +221,27 @@ package {
         }
 
         private function onExitClick(e:MouseEvent):void {
+            if (isProcessingExit) return;
+            isProcessingExit = true;
+
             cleanupLoaders();
-            NativeApplication.nativeApplication.exit(0);
+            
+            if (currentGameId) {
+                savingOverlay.width = stage.stageWidth;
+                savingOverlay.height = stage.stageHeight;
+                addChild(savingOverlay);
+                
+                var t:Timer = new Timer(1000, 1);
+                t.addEventListener(TimerEvent.TIMER_COMPLETE, function(te:TimerEvent):void {
+                    backupSave();
+                    flushLog();
+                    NativeApplication.nativeApplication.exit(0);
+                });
+                t.start();
+            } else {
+                flushLog();
+                NativeApplication.nativeApplication.exit(0);
+            }
         }
 
         private function setupFileManager():void {
@@ -350,10 +398,24 @@ package {
             cleanupErrorUI();
             cleanupLoaders();
             
-            servingFile = file;
+            currentGameId = file.name.substring(0, file.name.lastIndexOf("."));
+            currentGameId = currentGameId.replace(/[^a-zA-Z0-9_-]/g, "");
             
-            var safeName:String = encodeURIComponent(file.name);
-            var url:String = "http://127.0.0.1:" + SERVER_PORT + "/" + safeName;
+            restoreSave();
+
+            urlLoader = new URLLoader();
+            urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
+            urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
+            urlLoader.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
+            urlLoader.load(new URLRequest(file.url));
+        }
+
+        private function onBytesReady(e:Event):void {
+            urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
+            urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+
+            var bytes:ByteArray = urlLoader.data as ByteArray;
+            urlLoader = null;
 
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
@@ -361,8 +423,8 @@ package {
             swfLoader = new Loader();
             swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
             swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-            swfLoader.load(new URLRequest(url), context);
-            
+            swfLoader.loadBytes(bytes, context);
+
             addChild(swfLoader);
             bringExitToFront();
         }
@@ -388,9 +450,11 @@ package {
             swfLoader.y = Math.round((screenH - gameH * scale) / 2);
 
             bringExitToFront();
+            flushLog();
         }
 
         private function onGameError(e:IOErrorEvent):void {
+            flushLog();
             cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
@@ -425,16 +489,39 @@ package {
         }
 
         private function onBackToMenu(e:MouseEvent):void {
-            servingFile = null;
+            if (isProcessingExit) return;
+            isProcessingExit = true;
+            
             cleanupLoaders();
-            cleanupErrorUI();
-            stage.frameRate = 60;
-            while (numChildren > 0) removeChildAt(0);
-            setupExitButton();
-            setupFileManager();
+            
+            savingOverlay.width = stage.stageWidth;
+            savingOverlay.height = stage.stageHeight;
+            addChild(savingOverlay);
+            bringExitToFront();
+
+            var t:Timer = new Timer(1000, 1);
+            t.addEventListener(TimerEvent.TIMER_COMPLETE, function(te:TimerEvent):void {
+                backupSave();
+                currentGameId = null;
+                isProcessingExit = false;
+                
+                if (contains(savingOverlay)) removeChild(savingOverlay);
+                cleanupErrorUI();
+                stage.frameRate = 60;
+                while (numChildren > 0) removeChildAt(0);
+                setupExitButton();
+                setupFileManager();
+            });
+            t.start();
         }
 
         private function cleanupLoaders():void {
+            if (urlLoader) {
+                urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
+                urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+                try { urlLoader.close(); } catch (e:Error) {}
+                urlLoader = null;
+            }
             if (swfLoader) {
                 swfLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE, onGameLoaded);
                 swfLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
@@ -442,13 +529,6 @@ package {
                 if (contains(swfLoader)) removeChild(swfLoader);
                 swfLoader = null;
             }
-            
-            for each (var client:Socket in activeSockets) {
-                try {
-                    client.close();
-                } catch (e:Error) {}
-            }
-            activeSockets.length = 0;
         }
 
         private function cleanupErrorUI():void {

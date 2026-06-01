@@ -2,17 +2,18 @@ package {
     import flash.display.Sprite;
     import flash.display.Loader;
     import flash.display.LoaderInfo;
-    import flash.display.AVM1Movie;
-    import flash.display.MovieClip;
     import flash.display.StageScaleMode;
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
     import flash.events.MouseEvent;
-    import flash.events.TimerEvent;
+    import flash.events.ProgressEvent;
+    import flash.events.ServerSocketConnectEvent;
     import flash.net.URLRequest;
     import flash.net.URLLoader;
     import flash.net.URLLoaderDataFormat;
+    import flash.net.ServerSocket;
+    import flash.net.Socket;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
     import flash.filesystem.File;
@@ -21,7 +22,6 @@ package {
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
-    import flash.utils.Timer;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
     public class Main extends Sprite {
@@ -32,14 +32,17 @@ package {
         private var currentDir:File;
         private var errorTextField:TextField;
         private var backTextField:TextField;
-        private var skipTimer:Timer;
 
-        // الملف المؤقت الثابت — اسمه لا يتغير أبداً
-        // هذا هو سر حل مشكلة SharedObject
+        // إعدادات خادم الويب المحلي
+        private var serverSocket:ServerSocket;
+        private static const SERVER_PORT:int = 8080;
+        private static const SERVER_HOST:String = "127.0.0.1";
+
+        // الملف المؤقت الثابت لحل مشكلة نطاق الحفظ والأمان
         private static const TEMP_SWF_NAME:String = "current_game.swf";
         private var tempSWFFile:File;
 
-        // متغيرات السحب والتمرير
+        // متغيرات السحب والتمرير للقائمة
         private var isDragging:Boolean = false;
         private var startY:Number;
         private var listStartY:Number;
@@ -64,13 +67,69 @@ package {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
 
-            // تحديد مسار الملف المؤقت الثابت
+            // تعيين مسار التخزين المعزول داخل مجلد التطبيق الآمن
             tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
+            
+            startLocalServer();
             setupFileManager();
         }
 
         // ═══════════════════════════════════════════
-        //  مدير الملفات
+        //  إدارة وتشغيل خادم الويب المحلي (HTTP Server)
+        // ═══════════════════════════════════════════
+        
+        private function startLocalServer():void {
+            try {
+                serverSocket = new ServerSocket();
+                serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT, onClientConnect);
+                serverSocket.bind(SERVER_PORT, SERVER_HOST);
+                serverSocket.listen();
+            } catch (e:Error) {
+                // لتفادي الانهيار إذا كان المنفذ محجوزاً أو معلقاً من جلسة سابقة
+            }
+        }
+
+        private function onClientConnect(e:ServerSocketConnectEvent):void {
+            var clientSocket:Socket = e.socket;
+            clientSocket.addEventListener(ProgressEvent.SOCKET_DATA, onClientData);
+        }
+
+        private function onClientData(e:ProgressEvent):void {
+            var socket:Socket = e.target as Socket;
+            if (!socket) return;
+
+            try {
+                var request:String = socket.readUTFBytes(socket.bytesAvailable);
+                
+                // التحقق من صحة طلب ملف اللعبة المؤقتة
+                if (request.indexOf("GET /" + TEMP_SWF_NAME) != -1 && tempSWFFile.exists) {
+                    var fileBytes:ByteArray = new ByteArray();
+                    var stream:FileStream = new FileStream();
+                    stream.open(tempSWFFile, FileMode.READ);
+                    stream.readBytes(fileBytes);
+                    stream.close();
+
+                    // صياغة ترويسة HTTP متوافقة ومزودة بحجم المحتوى الصارم
+                    var header:String = "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: application/x-shockwave-flash\r\n" +
+                                        "Content-Length: " + fileBytes.length + "\r\n" +
+                                        "Connection: close\r\n\r\n";
+
+                    socket.writeUTFBytes(header);
+                    socket.writeBytes(fileBytes);
+                } else {
+                    socket.writeUTFBytes("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+                }
+            } catch (err:Error) {
+                // حماية الخادم المصغر من الانهيار التام عند انقطاع الاتصال المفاجئ
+            } finally {
+                socket.flush();
+                socket.close();
+            }
+        }
+
+        // ═══════════════════════════════════════════
+        //  إدارة ملفات النظام وعرض الواجهة
         // ═══════════════════════════════════════════
 
         private function setupFileManager():void {
@@ -174,7 +233,7 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  السحب والتمرير
+        //  أحداث السحب والتمرير المخصصة للمحمول
         // ═══════════════════════════════════════════
 
         private function onDown(e:MouseEvent):void {
@@ -230,7 +289,7 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  تشغيل اللعبة
+        //  استدعاء وتحميل اللعبة عبر الخادم المحلي
         // ═══════════════════════════════════════════
 
         private function loadGame(url:String):void {
@@ -265,17 +324,22 @@ package {
                 stream.writeBytes(bytes);
                 stream.close();
             } catch (writeError:Error) {
+                // تراجع تلقائي لقراءة الذاكرة الخام كخيار احتياطي لضمان عدم توقف النظام
                 loadViaBytes(bytes);
                 return;
             }
 
+            // إعداد سياق التحميل للنطاق المحلي الموحد
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
             swfLoader = new Loader();
             swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
             swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-            swfLoader.load(new URLRequest(tempSWFFile.url), context);
+            
+            // حقن الرابط الافتراضي الثابت عبر الخادم المحلي لتوفير حجم البيانات الصارم ودعم ملفات الحفظ
+            var localURL:String = "http://" + SERVER_HOST + ":" + SERVER_PORT + "/" + TEMP_SWF_NAME;
+            swfLoader.load(new URLRequest(localURL), context);
             addChild(swfLoader);
         }
 
@@ -315,32 +379,6 @@ package {
             swfLoader.scaleY = scale;
             swfLoader.x = Math.round((screenW - gameW * scale) / 2);
             swfLoader.y = Math.round((screenH - gameH * scale) / 2);
-
-            // بدء مؤقت التخطي الإجباري للإطارات
-            skipTimer = new Timer(3000, 1);
-            skipTimer.addEventListener(TimerEvent.TIMER_COMPLETE, onSkipPreloader);
-            skipTimer.start();
-        }
-
-        private function onSkipPreloader(e:TimerEvent):void {
-            cleanupSkipTimer();
-
-            try {
-                if (swfLoader.content is MovieClip) {
-                    var mc:MovieClip = swfLoader.content as MovieClip;
-                    mc.gotoAndPlay(2); 
-                }
-            } catch (err:Error) {
-                // التقاط الأخطاء في حال كانت اللعبة تمنع الوصول الأمني أو كانت بيئتها AVM1
-            }
-        }
-
-        private function cleanupSkipTimer():void {
-            if (skipTimer) {
-                skipTimer.stop();
-                skipTimer.removeEventListener(TimerEvent.TIMER_COMPLETE, onSkipPreloader);
-                skipTimer = null;
-            }
         }
 
         private function onGameError(e:IOErrorEvent):void {
@@ -388,12 +426,10 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  دوال مساعدة للتنظيف
+        //  دوال التنظيف المتقدمة وإدارة الذاكرة
         // ═══════════════════════════════════════════
 
         private function cleanupLoaders():void {
-            cleanupSkipTimer();
-
             if (urlLoader) {
                 urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
                 urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);

@@ -2,18 +2,18 @@ package {
     import flash.display.Sprite;
     import flash.display.Loader;
     import flash.display.LoaderInfo;
-    import flash.display.AVM1Movie;
     import flash.display.StageScaleMode;
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
     import flash.events.ProgressEvent;
     import flash.events.MouseEvent;
+    import flash.events.PermissionEvent;
     import flash.net.URLRequest;
     import flash.net.URLLoader;
     import flash.net.URLLoaderDataFormat;
     import flash.net.SharedObject;
-    import flash.net.SharedObjectFlushStatus;
+    import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
     import flash.filesystem.File;
@@ -33,17 +33,16 @@ package {
         private var currentDir:File;
         private var errorTextField:TextField;
         private var backTextField:TextField;
+        private var exitButton:Sprite;
 
         // الملف المؤقت الثابت
         private static const TEMP_SWF_NAME:String = "current_game.swf";
         private var tempSWFFile:File;
 
-        // ═══════════════════════════════════════════
-        //  نظام السجل التشخيصي
-        // ═══════════════════════════════════════════
-        private var logLines:Array = [];
+        // مجلد السجل في الذاكرة الداخلية — سهل الوصول
+        // /storage/emulated/0/nostagames/nostagames_log.txt
         private var logFile:File;
-        private var exitButton:Sprite;
+        private var logLines:Array = [];
 
         // متغيرات السحب والتمرير
         private var isDragging:Boolean = false;
@@ -71,126 +70,147 @@ package {
             stage.align = StageAlign.TOP_LEFT;
 
             tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
-            logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
 
-            // بدء السجل
+            // ═══════════════════════════════════════
+            // طلب الصلاحيات أولاً — مرة واحدة فقط
+            // عند أول تشغيل يظهر الحوار تلقائياً
+            // في المرات التالية يتخطى مباشرة
+            // ═══════════════════════════════════════
+            if (File.permissionStatus != PermissionStatus.GRANTED) {
+                var permFile:File = new File("/storage/emulated/0");
+                permFile.addEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
+                permFile.requestPermission();
+            } else {
+                // الصلاحية موجودة مسبقاً — ابدأ مباشرة
+                onPermissionGranted();
+            }
+        }
+
+        private function onPermissionResult(e:PermissionEvent):void {
+            (e.target as File).removeEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
+
+            if (e.status == PermissionStatus.GRANTED) {
+                onPermissionGranted();
+            } else {
+                // الصلاحية مرفوضة — اعمل بمجلد التطبيق فقط
+                onPermissionGranted();
+            }
+        }
+
+        private function onPermissionGranted():void {
+            // ═══════════════════════════════════════
+            // السجل في /storage/emulated/0/nostagames/
+            // مجلد سهل الوصول من أي مدير ملفات
+            // ═══════════════════════════════════════
+            try {
+                var logDir:File = new File("/storage/emulated/0/nostagames");
+                if (!logDir.exists) {
+                    logDir.createDirectory();
+                }
+                logFile = logDir.resolvePath("nostagames_log.txt");
+            } catch (e:Error) {
+                // إذا فشل نستخدم مجلد التطبيق كبديل
+                logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
+            }
+
             log("=== Nostagames Engine Started ===");
+            log("Permission: " + File.permissionStatus);
             log("App Storage: " + File.applicationStorageDirectory.nativePath);
-            log("Temp SWF Path: " + tempSWFFile.nativePath);
-
-            // مراقبة SharedObject على مستوى التطبيق
-            monitorSharedObjects();
+            log("Log File: " + logFile.nativePath);
+            log("Temp SWF: " + tempSWFFile.nativePath);
 
             setupExitButton();
             setupFileManager();
         }
 
         // ═══════════════════════════════════════════
-        //  دوال السجل
+        //  نظام السجل
         // ═══════════════════════════════════════════
 
         private function log(msg:String):void {
             var now:Date = new Date();
-            var line:String = "[" + now.toTimeString().substr(0,8) + "] " + msg;
+            var line:String = "[" + now.toTimeString().substr(0, 8) + "] " + msg;
             logLines.push(line);
-            // اكتب فوراً لكل سطر حتى لو أغلق التطبيق فجأة
             flushLog();
         }
 
         private function flushLog():void {
+            if (logFile == null) return;
             try {
                 var stream:FileStream = new FileStream();
                 stream.open(logFile, FileMode.WRITE);
-                stream.writeUTFBytes(logLines.join("\n"));
+                stream.writeUTFBytes(logLines.join("\n") + "\n");
                 stream.close();
             } catch (e:Error) {}
         }
 
-        // مراقبة SharedObject — يسجل كل flush تقوم به اللعبة
-        private function monitorSharedObjects():void {
-            // نراقب أي SharedObject يُطلب عبر تتبع الأحداث
-            // سنسجل معلومات الـ SharedObject بعد تحميل اللعبة
-        }
-
         // ═══════════════════════════════════════════
-        //  زر الخروج وحفظ السجل
+        //  زر الخروج ✕
         // ═══════════════════════════════════════════
 
         private function setupExitButton():void {
-            exitButton = new Sprite();
+            if (exitButton && contains(exitButton)) {
+                removeChild(exitButton);
+            }
 
-            // خلفية الزر
-            exitButton.graphics.beginFill(0xCC0000, 0.85);
-            exitButton.graphics.drawRoundRect(0, 0, 80, 80, 16);
+            exitButton = new Sprite();
+            exitButton.graphics.beginFill(0xCC0000, 0.9);
+            exitButton.graphics.drawRoundRect(0, 0, 80, 80, 14);
             exitButton.graphics.endFill();
 
-            // حرف X
             var tf:TextField = new TextField();
-            var fmt:TextFormat = new TextFormat("_sans", 44, 0xFFFFFF, true);
+            var fmt:TextFormat = new TextFormat("_sans", 46, 0xFFFFFF, true);
+            fmt.align = "center";
             tf.defaultTextFormat = fmt;
             tf.text = "✕";
             tf.width = 80;
-            tf.height = 70;
+            tf.height = 72;
             tf.x = 0;
-            tf.y = 5;
+            tf.y = 6;
             tf.selectable = false;
             tf.mouseEnabled = false;
-
-            // توسيط النص
-            fmt.align = "center";
-            tf.setTextFormat(fmt);
             exitButton.addChild(tf);
 
-            // الموضع: زاوية يمنى علوية
             exitButton.x = stage.stageWidth - 90;
             exitButton.y = 10;
             exitButton.addEventListener(MouseEvent.CLICK, onExitClick);
-
             addChild(exitButton);
         }
 
         private function onExitClick(e:MouseEvent):void {
-            log("=== EXIT BUTTON PRESSED ===");
+            log("=== EXIT PRESSED ===");
 
-            // محاولة قراءة SharedObjects الموجودة في مجلد التطبيق
+            // مسح كامل لمجلد App Storage
             try {
-                var soDir:File = File.applicationStorageDirectory;
-                log("Storage contents:");
-                var contents:Array = soDir.getDirectoryListing();
-                for each (var f:File in contents) {
-                    log("  - " + f.name + " (" + f.size + " bytes)");
-                }
-
-                // ابحث عن مجلد #SharedObjects
-                var sharedDir:File = soDir.resolvePath("#SharedObjects");
-                if (sharedDir.exists) {
-                    log("SharedObjects folder found!");
-                    listDirRecursive(sharedDir, "  ");
-                } else {
-                    log("SharedObjects folder NOT found in app storage");
-                }
-
-                // ابحث في مكان آخر محتمل
-                var localStore:File = File.applicationStorageDirectory.parent;
-                log("Parent dir: " + localStore.nativePath);
-                var localShared:File = localStore.resolvePath("#SharedObjects");
-                if (localShared.exists) {
-                    log("SharedObjects found in parent!");
-                    listDirRecursive(localShared, "  ");
-                }
-
-            } catch (dirError:Error) {
-                log("Dir scan error: " + dirError.message);
+                log("--- App Storage contents ---");
+                listDirRecursive(File.applicationStorageDirectory, "  ");
+            } catch (err:Error) {
+                log("Scan error: " + err.message);
             }
 
-            // احفظ السجل النهائي
+            // البحث عن #SharedObjects في كل المسارات المحتملة
+            var searchPaths:Array = [
+                File.applicationStorageDirectory.nativePath,
+                File.applicationStorageDirectory.parent.nativePath,
+                "/data/data/com.ncore.player.engine",
+                "/data/user/0/com.ncore.player.engine"
+            ];
+
+            for each (var p:String in searchPaths) {
+                try {
+                    var dir:File = new File(p);
+                    if (dir.exists) {
+                        log("--- Searching: " + p + " ---");
+                        listDirRecursive(dir, "  ");
+                    }
+                } catch (e2:Error) {
+                    log("Cannot access: " + p + " — " + e2.message);
+                }
+            }
+
             log("=== END OF LOG ===");
             flushLog();
 
-            log("Log saved to: " + logFile.nativePath);
-            flushLog();
-
-            // أغلق التطبيق
             NativeApplication.nativeApplication.exit(0);
         }
 
@@ -200,13 +220,16 @@ package {
                 for each (var item:File in items) {
                     if (item.isDirectory) {
                         log(indent + "[DIR] " + item.name);
-                        listDirRecursive(item, indent + "  ");
+                        // لا نتعمق أكثر من مستويين لتجنب الحلقات اللانهائية
+                        if (indent.length < 6) {
+                            listDirRecursive(item, indent + "  ");
+                        }
                     } else {
-                        log(indent + item.name + " (" + item.size + " bytes)");
+                        log(indent + item.name + " (" + item.size + "b)");
                     }
                 }
             } catch (e:Error) {
-                log(indent + "Error: " + e.message);
+                log(indent + "! " + e.message);
             }
         }
 
@@ -217,11 +240,7 @@ package {
         private function setupFileManager():void {
             uiContainer = new Sprite();
             addChild(uiContainer);
-
-            // تأكد أن زر الخروج فوق كل شيء
-            if (exitButton) {
-                setChildIndex(exitButton, numChildren - 1);
-            }
+            if (exitButton) setChildIndex(exitButton, numChildren - 1);
 
             listContainer = new Sprite();
             uiContainer.addChild(listContainer);
@@ -235,14 +254,12 @@ package {
                 currentDir = File.documentsDirectory;
             }
 
-            log("File manager opened. Dir: " + currentDir.nativePath);
+            log("File manager ready. Dir: " + currentDir.nativePath);
             renderDirectory(currentDir);
         }
 
         private function renderDirectory(dir:File):void {
-            while (listContainer.numChildren > 0) {
-                listContainer.removeChildAt(0);
-            }
+            while (listContainer.numChildren > 0) listContainer.removeChildAt(0);
             listContainer.y = 0;
             totalListHeight = 0;
 
@@ -264,11 +281,8 @@ package {
 
                 for each (var f:File in files) {
                     if (f.name.charAt(0) == ".") continue;
-                    if (f.isDirectory) {
-                        folders.push(f);
-                    } else if (f.extension != null && f.extension.toLowerCase() == "swf") {
-                        swfs.push(f);
-                    }
+                    if (f.isDirectory) folders.push(f);
+                    else if (f.extension != null && f.extension.toLowerCase() == "swf") swfs.push(f);
                 }
 
                 folders.sortOn("name", Array.CASEINSENSITIVE);
@@ -302,7 +316,6 @@ package {
 
         private function createListItem(txt:String, color:uint, format:TextFormat):Sprite {
             var item:Sprite = new Sprite();
-
             item.graphics.beginFill(0x222222);
             item.graphics.lineStyle(2, 0x444444);
             item.graphics.drawRect(0, 0, stage.stageWidth, 75);
@@ -319,7 +332,6 @@ package {
             tf.selectable = false;
             tf.mouseEnabled = false;
             item.addChild(tf);
-
             return item;
         }
 
@@ -353,9 +365,7 @@ package {
                 for (var i:int = 0; i < listContainer.numChildren; i++) {
                     var item:Sprite = listContainer.getChildAt(i) as Sprite;
                     if (item.hitTestPoint(e.stageX, e.stageY)) {
-                        if (item.name != "NONE") {
-                            handleItemClick(item.name);
-                        }
+                        if (item.name != "NONE") handleItemClick(item.name);
                         break;
                     }
                 }
@@ -384,12 +394,9 @@ package {
         // ═══════════════════════════════════════════
 
         private function loadGame(url:String):void {
-            log("Loading game: " + url);
+            log("Loading: " + url);
 
-            if (uiContainer && contains(uiContainer)) {
-                removeChild(uiContainer);
-            }
-
+            if (uiContainer && contains(uiContainer)) removeChild(uiContainer);
             stage.removeEventListener(MouseEvent.MOUSE_DOWN, onDown);
             stage.removeEventListener(MouseEvent.MOUSE_MOVE, onMove);
             stage.removeEventListener(MouseEvent.MOUSE_UP, onUp);
@@ -412,17 +419,16 @@ package {
             urlLoader = null;
 
             var realSize:uint = bytes.length;
-            log("Bytes loaded: " + realSize);
+            log("Bytes: " + realSize);
 
-            // كتابة الملف المؤقت الثابت
             try {
                 var stream:FileStream = new FileStream();
                 stream.open(tempSWFFile, FileMode.WRITE);
                 stream.writeBytes(bytes);
                 stream.close();
-                log("Temp SWF written: " + tempSWFFile.nativePath);
-            } catch (writeError:Error) {
-                log("Temp SWF write ERROR: " + writeError.message);
+                log("Temp SWF OK: " + tempSWFFile.nativePath);
+            } catch (err:Error) {
+                log("Temp SWF FAIL: " + err.message);
             }
 
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
@@ -434,74 +440,67 @@ package {
             swfLoader.loadBytes(bytes, context);
             addChild(swfLoader);
 
-            // إطلاق ProgressEvent مصطنع فوري
             try {
                 var pe:ProgressEvent = new ProgressEvent(
-                    ProgressEvent.PROGRESS, false, false,
-                    realSize, realSize
+                    ProgressEvent.PROGRESS, false, false, realSize, realSize
                 );
                 swfLoader.contentLoaderInfo.dispatchEvent(pe);
-            } catch (dispatchError:Error) {
-                log("ProgressEvent dispatch note: " + dispatchError.message);
+            } catch (de:Error) {
+                log("ProgressEvent note: " + de.message);
             }
 
-            // تأكد أن زر الخروج فوق اللعبة
-            if (exitButton) {
-                setChildIndex(exitButton, numChildren - 1);
-            }
+            if (exitButton) setChildIndex(exitButton, numChildren - 1);
         }
 
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
 
-            log("Game loaded!");
-            log("  frameRate: " + info.frameRate);
-            log("  width: " + info.width + " height: " + info.height);
-            log("  url: " + info.url);
+            log("Game loaded OK");
+            log("  URL seen by game: " + info.url);
             log("  loaderURL: " + info.loaderURL);
+            log("  frameRate: " + info.frameRate);
+            log("  size: " + info.width + "x" + info.height);
 
-            // سجّل معلومات SharedObject المتوقعة
+            // اختبار SharedObject لمعرفة المسار الذي تستخدمه
             try {
-                var so:SharedObject = SharedObject.getLocal("save", "/");
-                log("SharedObject test path '/': size=" + so.size);
+                var so:SharedObject = SharedObject.getLocal("shopempire");
+                log("  SO 'shopempire' size: " + so.size);
+                log("  SO data keys: " + getSOKeys(so));
                 so.close();
-            } catch(soErr:Error) {
-                log("SharedObject test error: " + soErr.message);
+            } catch (soErr:Error) {
+                log("  SO error: " + soErr.message);
             }
 
-            // ضبط السرعة
             var gameFrameRate:Number = info.frameRate;
             if (gameFrameRate > 0 && gameFrameRate <= 60) {
                 stage.frameRate = gameFrameRate;
-                log("frameRate set to: " + gameFrameRate);
             }
 
-            var gameW:Number = info.width;
-            var gameH:Number = info.height;
-            if (gameW <= 0) gameW = 550;
-            if (gameH <= 0) gameH = 400;
-
+            var gameW:Number = info.width > 0 ? info.width : 550;
+            var gameH:Number = info.height > 0 ? info.height : 400;
             var screenW:Number = stage.stageWidth;
             var screenH:Number = stage.stageHeight;
 
             var scale:Number = screenH / gameH;
-            if (gameW * scale > screenW) {
-                scale = screenW / gameW;
-            }
+            if (gameW * scale > screenW) scale = screenW / gameW;
 
             swfLoader.scaleX = scale;
             swfLoader.scaleY = scale;
             swfLoader.x = Math.round((screenW - gameW * scale) / 2);
             swfLoader.y = Math.round((screenH - gameH * scale) / 2);
 
-            log("Scale: " + scale + " x=" + swfLoader.x + " y=" + swfLoader.y);
             flushLog();
         }
 
-        private function onGameError(e:IOErrorEvent):void {
-            log("Game load ERROR: " + e.text);
-            flushLog();
+        private function getSOKeys(so:SharedObject):String {
+            var keys:Array = [];
+            for (var k:String in so.data) keys.push(k);
+            return keys.length > 0 ? keys.join(", ") : "(empty)";
+        }
 
+        private function onGameError(e:IOErrorEvent):void {
+            log("Game ERROR: " + e.text);
+            flushLog();
             cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
@@ -540,18 +539,13 @@ package {
             cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
-
-            while (numChildren > 0) {
-                removeChildAt(0);
-            }
-
-            // أعد إنشاء زر الخروج
+            while (numChildren > 0) removeChildAt(0);
             setupExitButton();
             setupFileManager();
         }
 
         // ═══════════════════════════════════════════
-        //  دوال مساعدة للتنظيف
+        //  دوال التنظيف
         // ═══════════════════════════════════════════
 
         private function cleanupLoaders():void {
@@ -561,7 +555,6 @@ package {
                 try { urlLoader.close(); } catch (e:Error) {}
                 urlLoader = null;
             }
-
             if (swfLoader) {
                 swfLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE, onGameLoaded);
                 swfLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);

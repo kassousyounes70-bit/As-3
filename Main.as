@@ -34,28 +34,20 @@ package {
         private var errorTextField:TextField;
         private var backTextField:TextField;
         private var exitButton:Sprite;
-
-        // ═══════════════════════════════════════════
-        //  الملف المؤقت الثابت — قلب الحل
-        //
-        //  اللعبة ستحفظ SharedObject تحت مجلد:
-        //  #SharedObjects / current_game.swf / xxx.sol
-        //  هذا الاسم ثابت دائماً → الحفظ يعمل ✅
-        // ═══════════════════════════════════════════
-        private static const TEMP_SWF_NAME:String = "current_game.swf";
-        private var tempSWFFile:File;
-
-        // السجل التشخيصي
+        
         private var logFile:File;
         private var logLines:Array = [];
-
-        // متغيرات السحب والتمرير
+        
         private var isDragging:Boolean = false;
         private var startY:Number;
         private var listStartY:Number;
         private var moveThreshold:Number = 15;
         private var hasMoved:Boolean = false;
         private var totalListHeight:Number = 0;
+
+        private var savesDir:File;
+        private var soMasterDir:File;
+        private var currentGameId:String;
 
         public function Main() {
             if (stage) {
@@ -74,9 +66,6 @@ package {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
 
-            tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
-
-            // طلب الصلاحية تلقائياً عند أول تشغيل فقط
             if (File.permissionStatus != PermissionStatus.GRANTED) {
                 var permFile:File = new File("/storage/emulated/0");
                 permFile.addEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
@@ -100,16 +89,79 @@ package {
                 logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
             }
 
-            log("=== Nostagames Engine Started ===");
-            log("Temp SWF path: " + tempSWFFile.nativePath);
-
+            initSOMaster();
             setupExitButton();
             setupFileManager();
         }
 
-        // ═══════════════════════════════════════════
-        //  السجل
-        // ═══════════════════════════════════════════
+        private function initSOMaster():void {
+            savesDir = File.applicationStorageDirectory.resolvePath("NostaSaves");
+            if (!savesDir.exists) savesDir.createDirectory();
+
+            var so:SharedObject = SharedObject.getLocal("nosta_dummy", "/");
+            so.data.init = true;
+            so.flush();
+
+            var baseSO:File = File.applicationStorageDirectory.resolvePath("#SharedObjects");
+            if (baseSO.exists) {
+                soMasterDir = findSODir(baseSO, "nosta_dummy.sol");
+            }
+        }
+
+        private function findSODir(dir:File, targetName:String):File {
+            if (!dir.isDirectory) return null;
+            var items:Array = dir.getDirectoryListing();
+            for each (var item:File in items) {
+                if (item.isDirectory) {
+                    var res:File = findSODir(item, targetName);
+                    if (res) return res;
+                } else if (item.name == targetName) {
+                    return dir;
+                }
+            }
+            return null;
+        }
+
+        private function backupSave():void {
+            if (!soMasterDir || !currentGameId) return;
+            var gameSaveDir:File = savesDir.resolvePath(currentGameId);
+            if (!gameSaveDir.exists) gameSaveDir.createDirectory();
+            copyDir(soMasterDir, gameSaveDir);
+        }
+
+        private function restoreSave():void {
+            if (!soMasterDir || !currentGameId) return;
+            clearDir(soMasterDir);
+            var gameSaveDir:File = savesDir.resolvePath(currentGameId);
+            if (gameSaveDir.exists) {
+                copyDir(gameSaveDir, soMasterDir);
+            }
+        }
+
+        private function clearDir(dir:File):void {
+            if (!dir.exists || !dir.isDirectory) return;
+            var items:Array = dir.getDirectoryListing();
+            for each (var item:File in items) {
+                try {
+                    if (item.isDirectory) item.deleteDirectory(true);
+                    else item.deleteFile();
+                } catch(e:Error) {}
+            }
+        }
+
+        private function copyDir(src:File, dst:File):void {
+            if (!src.exists) return;
+            if (!dst.exists) dst.createDirectory();
+            var items:Array = src.getDirectoryListing();
+            for each (var item:File in items) {
+                var destItem:File = dst.resolvePath(item.name);
+                if (item.isDirectory) {
+                    copyDir(item, destItem);
+                } else {
+                    item.copyTo(destItem, true);
+                }
+            }
+        }
 
         private function log(msg:String):void {
             var now:Date = new Date();
@@ -127,12 +179,6 @@ package {
             } catch (e:Error) {}
         }
 
-        // ═══════════════════════════════════════════
-        //  زر الخروج ✕ — مُصلَح
-        //  يعمل دائماً في أعلى كل شيء
-        //  ويغلق التطبيق فعلاً عند الضغط
-        // ═══════════════════════════════════════════
-
         private function setupExitButton():void {
             if (exitButton) {
                 exitButton.removeEventListener(MouseEvent.CLICK, onExitClick);
@@ -140,13 +186,10 @@ package {
             }
 
             exitButton = new Sprite();
-
-            // خلفية حمراء واضحة
             exitButton.graphics.beginFill(0xDD0000, 1.0);
             exitButton.graphics.drawRoundRect(0, 0, 80, 80, 14);
             exitButton.graphics.endFill();
 
-            // حرف X
             var tf:TextField = new TextField();
             var fmt:TextFormat = new TextFormat("_sans", 50, 0xFFFFFF, true);
             fmt.align = "center";
@@ -159,11 +202,9 @@ package {
             tf.selectable = false;
             tf.mouseEnabled = false;
             exitButton.addChild(tf);
-
+            
             exitButton.x = stage.stageWidth - 90;
             exitButton.y = 10;
-
-            // mouseChildren = false يجعل الضغط على الزر كله يعمل
             exitButton.mouseChildren = false;
             exitButton.mouseEnabled = true;
             exitButton.addEventListener(MouseEvent.CLICK, onExitClick);
@@ -178,37 +219,10 @@ package {
         }
 
         private function onExitClick(e:MouseEvent):void {
-            log("=== EXIT PRESSED ===");
-            try {
-                log("--- SharedObjects ---");
-                listDirRecursive(File.applicationStorageDirectory, "  ");
-            } catch (err:Error) {
-                log("Scan error: " + err.message);
-            }
-            log("=== END ===");
+            backupSave();
             flushLog();
             NativeApplication.nativeApplication.exit(0);
         }
-
-        private function listDirRecursive(dir:File, indent:String):void {
-            try {
-                var items:Array = dir.getDirectoryListing();
-                for each (var item:File in items) {
-                    if (item.isDirectory) {
-                        log(indent + "[DIR] " + item.name);
-                        if (indent.length < 8) listDirRecursive(item, indent + "  ");
-                    } else {
-                        log(indent + item.name + " (" + item.size + "b)");
-                    }
-                }
-            } catch (e:Error) {
-                log(indent + "! " + e.message);
-            }
-        }
-
-        // ═══════════════════════════════════════════
-        //  مدير الملفات
-        // ═══════════════════════════════════════════
 
         private function setupFileManager():void {
             uiContainer = new Sprite();
@@ -235,7 +249,7 @@ package {
 
             var yPos:Number = 0;
             var format:TextFormat = new TextFormat("_sans", 40, 0xFFFFFF, true);
-
+            
             if (dir.parent != null) {
                 var upBtn:Sprite = createListItem("[ .. GO UP .. ]", 0xFFFF00, format);
                 upBtn.y = yPos;
@@ -257,7 +271,7 @@ package {
 
                 folders.sortOn("name", Array.CASEINSENSITIVE);
                 swfs.sortOn("name", Array.CASEINSENSITIVE);
-
+                
                 for each (var folder:File in folders) {
                     var fBtn:Sprite = createListItem("[DIR] " + folder.name, 0xAAAAAA, format);
                     fBtn.y = yPos;
@@ -305,10 +319,6 @@ package {
             return item;
         }
 
-        // ═══════════════════════════════════════════
-        //  السحب والتمرير
-        // ═══════════════════════════════════════════
-
         private function onDown(e:MouseEvent):void {
             isDragging = true;
             hasMoved = false;
@@ -354,27 +364,12 @@ package {
                     currentDir = f;
                     renderDirectory(currentDir);
                 } else {
-                    loadGame(f.url);
+                    loadGame(f);
                 }
             }
         }
 
-        // ═══════════════════════════════════════════
-        //  تشغيل اللعبة — الحل النهائي
-        //
-        //  الخطوات:
-        //  1. URLLoader يقرأ bytes اللعبة + يحفظ حجمها
-        //  2. نكتب bytes في current_game.swf الثابت
-        //  3. نحمّل من current_game.swf مباشرة بـ load()
-        //     → اللعبة ترى URL: app-storage:/current_game.swf
-        //     → SharedObject يُحفظ تحت: #SharedObjects/current_game.swf/
-        //     → نفس المسار في كل جلسة → الحفظ يعمل ✅
-        //  4. ProgressEvent مصطنع قبل load() لحل bytesTotal=0
-        // ═══════════════════════════════════════════
-
-        private function loadGame(url:String):void {
-            log("Loading: " + url);
-
+        private function loadGame(file:File):void {
             if (uiContainer && contains(uiContainer)) removeChild(uiContainer);
             stage.removeEventListener(MouseEvent.MOUSE_DOWN, onDown);
             stage.removeEventListener(MouseEvent.MOUSE_MOVE, onMove);
@@ -382,13 +377,17 @@ package {
 
             cleanupErrorUI();
             cleanupLoaders();
+            
+            currentGameId = file.name.substring(0, file.name.lastIndexOf("."));
+            currentGameId = currentGameId.replace(/[^a-zA-Z0-9_-]/g, "");
+            
+            restoreSave();
 
-            // الخطوة 1: اقرأ الملف كاملاً أولاً
             urlLoader = new URLLoader();
             urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
             urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
             urlLoader.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-            urlLoader.load(new URLRequest(url));
+            urlLoader.load(new URLRequest(file.url));
         }
 
         private function onBytesReady(e:Event):void {
@@ -398,40 +397,13 @@ package {
             var bytes:ByteArray = urlLoader.data as ByteArray;
             urlLoader = null;
 
-            var realSize:uint = bytes.length;
-            log("Size: " + realSize + " bytes");
-
-            // الخطوة 2: اكتب في current_game.swf الثابت
-            var writeOK:Boolean = false;
-            try {
-                var stream:FileStream = new FileStream();
-                stream.open(tempSWFFile, FileMode.WRITE);
-                stream.writeBytes(bytes);
-                stream.close();
-                writeOK = true;
-                log("Temp SWF written OK");
-            } catch (err:Error) {
-                log("Temp SWF write FAILED: " + err.message);
-            }
-
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
             swfLoader = new Loader();
             swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
             swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-
-            if (writeOK) {
-                // ✅ الخطوة 3: حمّل من الملف الثابت مباشرة
-                // URL ثابت = app-storage:/current_game.swf
-                // SharedObject سيُحفظ تحت current_game.swf دائماً
-                swfLoader.load(new URLRequest(tempSWFFile.url), context);
-                log("Loading from fixed path: " + tempSWFFile.url);
-            } else {
-                // fallback: loadBytes إذا فشلت الكتابة
-                swfLoader.loadBytes(bytes, context);
-                log("Fallback: loadBytes");
-            }
+            swfLoader.loadBytes(bytes, context);
 
             addChild(swfLoader);
             bringExitToFront();
@@ -439,19 +411,11 @@ package {
 
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
-
-            log("Game loaded!");
-            log("  URL: " + info.url);
-            log("  frameRate: " + info.frameRate);
-            log("  size: " + info.width + "x" + info.height);
-
-            // ✅ ضبط سرعة اللعبة تلقائياً
             var fps:Number = info.frameRate;
             if (fps > 0 && fps <= 60) {
                 stage.frameRate = fps;
             }
 
-            // ✅ توسيط مع Letterbox
             var gameW:Number = info.width > 0 ? info.width : 550;
             var gameH:Number = info.height > 0 ? info.height : 400;
             var screenW:Number = stage.stageWidth;
@@ -470,7 +434,6 @@ package {
         }
 
         private function onGameError(e:IOErrorEvent):void {
-            log("ERROR: " + e.text);
             flushLog();
             cleanupLoaders();
             cleanupErrorUI();
@@ -481,7 +444,7 @@ package {
             errorTextField.defaultTextFormat = format;
             errorTextField.multiline = true;
             errorTextField.wordWrap = true;
-            errorTextField.text = "فشل تحميل اللعبة\n" + e.text;
+            errorTextField.text = "Error\n" + e.text;
             errorTextField.width = stage.stageWidth - 80;
             errorTextField.height = 200;
             errorTextField.x = 40;
@@ -492,7 +455,7 @@ package {
             var backFormat:TextFormat = new TextFormat("_sans", 40, 0xFFFF00, true);
             backTextField = new TextField();
             backTextField.defaultTextFormat = backFormat;
-            backTextField.text = "[ اضغط هنا للعودة ]";
+            backTextField.text = "[ BACK ]";
             backTextField.width = stage.stageWidth - 80;
             backTextField.height = 70;
             backTextField.x = 40;
@@ -506,7 +469,9 @@ package {
         }
 
         private function onBackToMenu(e:MouseEvent):void {
-            log("Back to menu");
+            backupSave();
+            currentGameId = null;
+            
             cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
@@ -514,10 +479,6 @@ package {
             setupExitButton();
             setupFileManager();
         }
-
-        // ═══════════════════════════════════════════
-        //  دوال التنظيف
-        // ═══════════════════════════════════════════
 
         private function cleanupLoaders():void {
             if (urlLoader) {

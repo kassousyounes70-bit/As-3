@@ -97,29 +97,8 @@ package {
         private function initSOMaster():void {
             savesDir = File.applicationStorageDirectory.resolvePath("NostaSaves");
             if (!savesDir.exists) savesDir.createDirectory();
-
-            var so:SharedObject = SharedObject.getLocal("nosta_dummy", "/");
-            so.data.init = true;
-            so.flush();
-
-            var baseSO:File = File.applicationStorageDirectory.resolvePath("#SharedObjects");
-            if (baseSO.exists) {
-                soMasterDir = findSODir(baseSO, "nosta_dummy.sol");
-            }
-        }
-
-        private function findSODir(dir:File, targetName:String):File {
-            if (!dir.isDirectory) return null;
-            var items:Array = dir.getDirectoryListing();
-            for each (var item:File in items) {
-                if (item.isDirectory) {
-                    var res:File = findSODir(item, targetName);
-                    if (res) return res;
-                } else if (item.name == targetName) {
-                    return dir;
-                }
-            }
-            return null;
+            
+            soMasterDir = File.applicationStorageDirectory.resolvePath("#SharedObjects");
         }
 
         private function backupSave():void {
@@ -219,6 +198,7 @@ package {
         }
 
         private function onExitClick(e:MouseEvent):void {
+            cleanupLoaders();
             backupSave();
             flushLog();
             NativeApplication.nativeApplication.exit(0);
@@ -469,10 +449,10 @@ package {
         }
 
         private function onBackToMenu(e:MouseEvent):void {
+            cleanupLoaders();
             backupSave();
             currentGameId = null;
             
-            cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
             while (numChildren > 0) removeChildAt(0);

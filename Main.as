@@ -16,13 +16,13 @@ package {
     import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
-    import flash.system.Security;
     import flash.filesystem.File;
     import flash.filesystem.FileStream;
     import flash.filesystem.FileMode;
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
+    import flash.utils.setTimeout;
     import flash.desktop.NativeApplication;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
@@ -34,6 +34,9 @@ package {
         private var errorTextField:TextField;
         private var backTextField:TextField;
         private var exitButton:Sprite;
+        
+        private var logFile:File;
+        private var logLines:Array = [];
         
         private var isDragging:Boolean = false;
         private var startY:Number;
@@ -64,9 +67,6 @@ package {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
 
-            Security.allowDomain("*");
-            Security.allowInsecureDomain("*");
-
             if (File.permissionStatus != PermissionStatus.GRANTED) {
                 var permFile:File = new File("/storage/emulated/0");
                 permFile.addEventListener(PermissionEvent.PERMISSION_STATUS, onPermissionResult);
@@ -82,9 +82,35 @@ package {
         }
 
         private function onPermissionGranted():void {
+            try {
+                var logDir:File = new File("/storage/emulated/0/nostagames");
+                if (!logDir.exists) logDir.createDirectory();
+                logFile = logDir.resolvePath("nostagames_log.txt");
+            } catch (e:Error) {
+                logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
+            }
+
+            log("=== Nostagames Server Engine Started ===");
+
             startLocalServer();
             setupExitButton();
             setupFileManager();
+        }
+
+        private function log(msg:String):void {
+            var now:Date = new Date();
+            logLines.push("[" + now.toTimeString().substr(0, 8) + "] " + msg);
+            flushLog();
+        }
+
+        private function flushLog():void {
+            if (!logFile) return;
+            try {
+                var s:FileStream = new FileStream();
+                s.open(logFile, FileMode.WRITE);
+                s.writeUTFBytes(logLines.join("\n") + "\n");
+                s.close();
+            } catch (e:Error) {}
         }
 
         private function startLocalServer():void {
@@ -94,7 +120,12 @@ package {
                     serverSocket.bind(SERVER_PORT, "127.0.0.1");
                     serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT, onClientConnect);
                     serverSocket.listen();
-                } catch (e:Error) {}
+                    log("Server listening on port " + SERVER_PORT);
+                } catch (e:Error) {
+                    log("Server failed to bind: " + e.message);
+                }
+            } else {
+                log("ServerSocket not supported on this device.");
             }
         }
 
@@ -118,10 +149,11 @@ package {
                         var cHeader:String = "HTTP/1.1 200 OK\r\n" +
                                              "Content-Type: text/xml\r\n" +
                                              "Content-Length: " + crossdomain.length + "\r\n" +
-                                             "Connection: keep-alive\r\n\r\n";
+                                             "Connection: close\r\n\r\n";
                         client.writeUTFBytes(cHeader);
                         client.writeUTFBytes(crossdomain);
                         client.flush();
+                        setTimeout(closeClientSocket, 500, client);
                         return;
                     }
 
@@ -132,23 +164,35 @@ package {
                         fs.readBytes(bytes);
                         fs.close();
 
-                        var header:String = "HTTP/1.1 200 OK\r\n" +
+                        var header:String = "HTTP/1.0 200 OK\r\n" +
                                             "Content-Type: application/x-shockwave-flash\r\n" +
                                             "Content-Length: " + bytes.length + "\r\n" +
                                             "Access-Control-Allow-Origin: *\r\n" +
-                                            "Connection: keep-alive\r\n\r\n";
+                                            "Connection: close\r\n\r\n";
 
                         client.writeUTFBytes(header);
                         client.writeBytes(bytes);
                         client.flush();
+                        
+                        setTimeout(closeClientSocket, 1500, client);
                     } else {
-                        var notFound:String = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
+                        var notFound:String = "HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n";
                         client.writeUTFBytes(notFound);
                         client.flush();
-                        client.close();
+                        setTimeout(closeClientSocket, 500, client);
                     }
                 }
-            } catch (err:Error) {}
+            } catch (err:Error) {
+                log("Socket Read Error: " + err.message);
+            }
+        }
+
+        private function closeClientSocket(client:Socket):void {
+            try {
+                if (client && client.connected) {
+                    client.close();
+                }
+            } catch(e:Error) {}
         }
 
         private function onClientClose(e:Event):void {
@@ -292,14 +336,14 @@ package {
             var item:Sprite = new Sprite();
             item.graphics.beginFill(0x222222);
             item.graphics.lineStyle(2, 0x444444);
-            item.graphics.drawRect(0, 0, stage.stageWidth, 75);
+            item.graphics.drawRect(0, 0, stage.stageWidth > 0 ? stage.stageWidth : 1280, 75);
             item.graphics.endFill();
 
             var tf:TextField = new TextField();
             tf.defaultTextFormat = format;
             tf.textColor = color;
             tf.text = txt;
-            tf.width = stage.stageWidth - 40;
+            tf.width = (stage.stageWidth > 0 ? stage.stageWidth : 1280) - 40;
             tf.height = 60;
             tf.x = 20;
             tf.y = 10;
@@ -373,6 +417,8 @@ package {
             var safeName:String = encodeURIComponent(file.name);
             var url:String = "http://127.0.0.1:" + SERVER_PORT + "/" + safeName;
 
+            log("Loading from server: " + url);
+
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
@@ -387,6 +433,8 @@ package {
 
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
+            log("Game loaded successfully. URL: " + info.url);
+            
             var fps:Number = info.frameRate;
             if (fps > 0 && fps <= 60) {
                 stage.frameRate = fps;
@@ -394,8 +442,8 @@ package {
 
             var gameW:Number = info.width > 0 ? info.width : 550;
             var gameH:Number = info.height > 0 ? info.height : 400;
-            var screenW:Number = stage.stageWidth;
-            var screenH:Number = stage.stageHeight;
+            var screenW:Number = stage.stageWidth > 0 ? stage.stageWidth : 1280;
+            var screenH:Number = stage.stageHeight > 0 ? stage.stageHeight : 720;
 
             var scale:Number = screenH / gameH;
             if (gameW * scale > screenW) scale = screenW / gameW;
@@ -409,6 +457,7 @@ package {
         }
 
         private function onGameError(e:IOErrorEvent):void {
+            log("Loader IO Error: " + e.text);
             cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
@@ -419,10 +468,10 @@ package {
             errorTextField.multiline = true;
             errorTextField.wordWrap = true;
             errorTextField.text = "Error\n" + e.text;
-            errorTextField.width = stage.stageWidth - 80;
+            errorTextField.width = (stage.stageWidth > 0 ? stage.stageWidth : 1280) - 80;
             errorTextField.height = 200;
             errorTextField.x = 40;
-            errorTextField.y = (stage.stageHeight / 2) - 150;
+            errorTextField.y = ((stage.stageHeight > 0 ? stage.stageHeight : 720) / 2) - 150;
             errorTextField.selectable = false;
             addChild(errorTextField);
 
@@ -430,10 +479,10 @@ package {
             backTextField = new TextField();
             backTextField.defaultTextFormat = backFormat;
             backTextField.text = "[ BACK ]";
-            backTextField.width = stage.stageWidth - 80;
+            backTextField.width = (stage.stageWidth > 0 ? stage.stageWidth : 1280) - 80;
             backTextField.height = 70;
             backTextField.x = 40;
-            backTextField.y = (stage.stageHeight / 2) + 80;
+            backTextField.y = ((stage.stageHeight > 0 ? stage.stageHeight : 720) / 2) + 80;
             backTextField.selectable = false;
             backTextField.mouseEnabled = true;
             backTextField.addEventListener(MouseEvent.CLICK, onBackToMenu);

@@ -3,11 +3,13 @@ package {
     import flash.display.Loader;
     import flash.display.LoaderInfo;
     import flash.display.AVM1Movie;
+    import flash.display.MovieClip;
     import flash.display.StageScaleMode;
     import flash.display.StageAlign;
     import flash.events.Event;
     import flash.events.IOErrorEvent;
     import flash.events.MouseEvent;
+    import flash.events.TimerEvent;
     import flash.net.URLRequest;
     import flash.net.URLLoader;
     import flash.net.URLLoaderDataFormat;
@@ -19,6 +21,7 @@ package {
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
+    import flash.utils.Timer;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
     public class Main extends Sprite {
@@ -29,6 +32,7 @@ package {
         private var currentDir:File;
         private var errorTextField:TextField;
         private var backTextField:TextField;
+        private var skipTimer:Timer;
 
         // الملف المؤقت الثابت — اسمه لا يتغير أبداً
         // هذا هو سر حل مشكلة SharedObject
@@ -61,9 +65,7 @@ package {
             stage.align = StageAlign.TOP_LEFT;
 
             // تحديد مسار الملف المؤقت الثابت
-            // File.applicationStorageDirectory = مجلد خاص بالتطبيق دائماً موجود
             tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
-
             setupFileManager();
         }
 
@@ -96,10 +98,8 @@ package {
             }
             listContainer.y = 0;
             totalListHeight = 0;
-
             var yPos:Number = 0;
             var format:TextFormat = new TextFormat("_sans", 40, 0xFFFFFF, true);
-
             if (dir.parent != null) {
                 var upBtn:Sprite = createListItem("[ .. GO UP .. ]", 0xFFFF00, format);
                 upBtn.y = yPos;
@@ -153,7 +153,6 @@ package {
 
         private function createListItem(txt:String, color:uint, format:TextFormat):Sprite {
             var item:Sprite = new Sprite();
-
             item.graphics.beginFill(0x222222);
             item.graphics.lineStyle(2, 0x444444);
             item.graphics.drawRect(0, 0, stage.stageWidth, 75);
@@ -231,30 +230,7 @@ package {
         }
 
         // ═══════════════════════════════════════════
-        //  تشغيل اللعبة — الحل المزدوج
-        //
-        //  المشكلة:
-        //  ┌─────────────────────────────────────────┐
-        //  │ loadBytes() ← pseudo-URL يتغير كل جلسة │
-        //  │ → SharedObject يُفقد عند إغلاق التطبيق │
-        //  │                                         │
-        //  │ load() مباشر ← bytesTotal = 0           │
-        //  │ → preloader اللعبة لا يكتمل أبداً      │
-        //  └─────────────────────────────────────────┘
-        //
-        //  الحل المزدوج:
-        //  ┌─────────────────────────────────────────┐
-        //  │ 1. URLLoader يقرأ bytes اللعبة          │
-        //  │    → يحل bytesTotal للـ preloader       │
-        //  │                                         │
-        //  │ 2. نكتب الـ bytes في ملف مؤقت ثابت     │
-        //  │    الاسم: "current_game.swf" دائماً     │
-        //  │    → URL ثابت لا يتغير أبداً            │
-        //  │                                         │
-        //  │ 3. load() من الملف المؤقت الثابت        │
-        //  │    → SharedObject يُحفظ ويُسترجع ✅     │
-        //  │    → preloader يعمل لأن الملف محلي ✅   │
-        //  └─────────────────────────────────────────┘
+        //  تشغيل اللعبة
         // ═══════════════════════════════════════════
 
         private function loadGame(url:String):void {
@@ -269,7 +245,6 @@ package {
             cleanupErrorUI();
             cleanupLoaders();
 
-            // الخطوة 1: اقرأ ملف اللعبة كاملاً كـ ByteArray
             urlLoader = new URLLoader();
             urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
             urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
@@ -284,23 +259,16 @@ package {
             var bytes:ByteArray = urlLoader.data as ByteArray;
             urlLoader = null;
 
-            // الخطوة 2: اكتب الـ bytes في الملف المؤقت الثابت
-            // "current_game.swf" — نفس الاسم دائماً لكل لعبة
-            // هذا يضمن أن الـ SharedObject يجد نفس المسار في كل جلسة
             try {
                 var stream:FileStream = new FileStream();
                 stream.open(tempSWFFile, FileMode.WRITE);
                 stream.writeBytes(bytes);
                 stream.close();
             } catch (writeError:Error) {
-                // إذا فشل الكتابة نحاول loadBytes كبديل
                 loadViaBytes(bytes);
                 return;
             }
 
-            // الخطوة 3: حمّل من الملف المؤقت الثابت
-            // الآن اللعبة ترى URL ثابت: app-storage:/current_game.swf
-            // هذا URL لا يتغير أبداً بين الجلسات
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
 
@@ -311,7 +279,6 @@ package {
             addChild(swfLoader);
         }
 
-        // بديل احتياطي إذا فشل الكتابة للملف المؤقت
         private function loadViaBytes(bytes:ByteArray):void {
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
@@ -325,8 +292,7 @@ package {
 
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
-
-            // ✅ ضبط سرعة اللعبة تلقائياً حسب frameRate الأصلي
+            
             var gameFrameRate:Number = info.frameRate;
             if (gameFrameRate > 0 && gameFrameRate <= 60) {
                 stage.frameRate = gameFrameRate;
@@ -340,7 +306,6 @@ package {
             var screenW:Number = stage.stageWidth;
             var screenH:Number = stage.stageHeight;
 
-            // ✅ توسيط مع Letterbox — أسود يمين ويسار
             var scale:Number = screenH / gameH;
             if (gameW * scale > screenW) {
                 scale = screenW / gameW;
@@ -350,6 +315,32 @@ package {
             swfLoader.scaleY = scale;
             swfLoader.x = Math.round((screenW - gameW * scale) / 2);
             swfLoader.y = Math.round((screenH - gameH * scale) / 2);
+
+            // بدء مؤقت التخطي الإجباري للإطارات
+            skipTimer = new Timer(3000, 1);
+            skipTimer.addEventListener(TimerEvent.TIMER_COMPLETE, onSkipPreloader);
+            skipTimer.start();
+        }
+
+        private function onSkipPreloader(e:TimerEvent):void {
+            cleanupSkipTimer();
+
+            try {
+                if (swfLoader.content is MovieClip) {
+                    var mc:MovieClip = swfLoader.content as MovieClip;
+                    mc.gotoAndPlay(2); 
+                }
+            } catch (err:Error) {
+                // التقاط الأخطاء في حال كانت اللعبة تمنع الوصول الأمني أو كانت بيئتها AVM1
+            }
+        }
+
+        private function cleanupSkipTimer():void {
+            if (skipTimer) {
+                skipTimer.stop();
+                skipTimer.removeEventListener(TimerEvent.TIMER_COMPLETE, onSkipPreloader);
+                skipTimer = null;
+            }
         }
 
         private function onGameError(e:IOErrorEvent):void {
@@ -401,6 +392,8 @@ package {
         // ═══════════════════════════════════════════
 
         private function cleanupLoaders():void {
+            cleanupSkipTimer();
+
             if (urlLoader) {
                 urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
                 urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);

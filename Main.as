@@ -9,11 +9,10 @@ package {
     import flash.events.ProgressEvent;
     import flash.events.MouseEvent;
     import flash.events.PermissionEvent;
-    import flash.events.ServerSocketConnectEvent;
-    import flash.events.TimerEvent;
     import flash.net.URLRequest;
-    import flash.net.ServerSocket;
-    import flash.net.Socket;
+    import flash.net.URLLoader;
+    import flash.net.URLLoaderDataFormat;
+    import flash.net.SharedObject;
     import flash.permissions.PermissionStatus;
     import flash.system.ApplicationDomain;
     import flash.system.LoaderContext;
@@ -23,34 +22,32 @@ package {
     import flash.text.TextField;
     import flash.text.TextFormat;
     import flash.utils.ByteArray;
-    import flash.utils.Timer;
     import flash.utils.setTimeout;
     import flash.desktop.NativeApplication;
 
     [SWF(width="1280", height="720", frameRate="60", backgroundColor="#000000")]
     public class Main extends Sprite {
         private var swfLoader:Loader;
+        private var urlLoader:URLLoader;
         private var uiContainer:Sprite;
         private var listContainer:Sprite;
         private var currentDir:File;
         private var errorTextField:TextField;
         private var backTextField:TextField;
         private var exitButton:Sprite;
-        
+        private var awakenButton:Sprite;
+
+        private static const TEMP_SWF_NAME:String = "current_game.swf";
+        private var tempSWFFile:File;
         private var logFile:File;
         private var logLines:Array = [];
-        
+
         private var isDragging:Boolean = false;
         private var startY:Number;
         private var listStartY:Number;
         private var moveThreshold:Number = 15;
         private var hasMoved:Boolean = false;
         private var totalListHeight:Number = 0;
-
-        private var serverSocket:ServerSocket;
-        private var activeSockets:Vector.<Socket> = new Vector.<Socket>();
-        private var servingFile:File;
-        private const SERVER_PORT:int = 8765;
 
         public function Main() {
             if (stage) {
@@ -68,6 +65,8 @@ package {
         private function init():void {
             stage.scaleMode = StageScaleMode.NO_SCALE;
             stage.align = StageAlign.TOP_LEFT;
+
+            tempSWFFile = File.applicationStorageDirectory.resolvePath(TEMP_SWF_NAME);
 
             if (File.permissionStatus != PermissionStatus.GRANTED) {
                 var permFile:File = new File("/storage/emulated/0");
@@ -92,10 +91,10 @@ package {
                 logFile = File.applicationStorageDirectory.resolvePath("nostagames_log.txt");
             }
 
-            log("=== Nostagames Server Engine Throttled Started ===");
+            log("=== Nostagames Engine V4 (Awaken Injection) Started ===");
 
-            startLocalServer();
             setupExitButton();
+            setupAwakenButton();
             setupFileManager();
         }
 
@@ -113,165 +112,6 @@ package {
                 s.writeUTFBytes(logLines.join("\n") + "\n");
                 s.close();
             } catch (e:Error) {}
-        }
-
-        private function startLocalServer():void {
-            if (ServerSocket.isSupported) {
-                try {
-                    serverSocket = new ServerSocket();
-                    serverSocket.bind(SERVER_PORT, "127.0.0.1");
-                    serverSocket.addEventListener(ServerSocketConnectEvent.CONNECT, onClientConnect);
-                    serverSocket.listen();
-                    log("Server listening on port " + SERVER_PORT);
-                } catch (e:Error) {
-                    log("Server failed to bind: " + e.message);
-                }
-            }
-        }
-
-        private function onClientConnect(e:ServerSocketConnectEvent):void {
-            var client:Socket = e.socket;
-            activeSockets.push(client);
-            client.addEventListener(ProgressEvent.SOCKET_DATA, onClientData);
-            client.addEventListener(Event.CLOSE, onClientClose);
-            client.addEventListener(IOErrorEvent.IO_ERROR, onClientError);
-        }
-
-        private function onClientData(e:ProgressEvent):void {
-            var client:Socket = e.target as Socket;
-            try {
-                var requestStr:String = client.readUTFBytes(client.bytesAvailable);
-                var lines:Array = requestStr.split("\n");
-                var firstLine:String = lines[0];
-                
-                log("Req: " + firstLine);
-
-                var pathMatch:Array = firstLine.match(/GET\s+\/([^\s\?]*)/);
-                if (!pathMatch) return;
-                
-                var reqPath:String = decodeURIComponent(pathMatch[1]);
-                if (reqPath == "" && servingFile) reqPath = servingFile.name;
-
-                if (reqPath == "crossdomain.xml") {
-                    var crossdomain:String = '<?xml version="1.0"?><cross-domain-policy><allow-access-from domain="*" /></cross-domain-policy>';
-                    var cHeader:String = "HTTP/1.1 200 OK\r\n" +
-                                         "Content-Type: text/xml\r\n" +
-                                         "Content-Length: " + crossdomain.length + "\r\n" +
-                                         "Connection: keep-alive\r\n\r\n";
-                    client.writeUTFBytes(cHeader);
-                    client.writeUTFBytes(crossdomain);
-                    client.flush();
-                    return;
-                }
-
-                var targetFile:File = null;
-                if (servingFile && (reqPath == servingFile.name || reqPath == encodeURIComponent(servingFile.name))) {
-                    targetFile = servingFile;
-                } else if (servingFile && servingFile.parent) {
-                    try {
-                        targetFile = servingFile.parent.resolvePath(reqPath);
-                    } catch(err:Error) {
-                        targetFile = null;
-                    }
-                }
-
-                if (targetFile && targetFile.exists && !targetFile.isDirectory) {
-                    var fs:FileStream = new FileStream();
-                    fs.open(targetFile, FileMode.READ);
-                    var bytes:ByteArray = new ByteArray();
-                    fs.readBytes(bytes);
-                    fs.close();
-
-                    var ext:String = targetFile.extension ? targetFile.extension.toLowerCase() : "";
-                    var contentType:String = "application/octet-stream";
-                    if (ext == "swf") contentType = "application/x-shockwave-flash";
-                    else if (ext == "xml") contentType = "text/xml";
-                    else if (ext == "png") contentType = "image/png";
-                    else if (ext == "jpg" || ext == "jpeg") contentType = "image/jpeg";
-                    else if (ext == "json") contentType = "application/json";
-                    else if (ext == "txt") contentType = "text/plain";
-
-                    var header:String = "HTTP/1.1 200 OK\r\n" +
-                                        "Content-Type: " + contentType + "\r\n" +
-                                        "Content-Length: " + bytes.length + "\r\n" +
-                                        "Access-Control-Allow-Origin: *\r\n" +
-                                        "Connection: keep-alive\r\n\r\n";
-
-                    client.writeUTFBytes(header);
-                    client.flush();
-
-                    if (ext == "swf") {
-                        var totalChunks:int = 10;
-                        var chunkSize:uint = Math.ceil(bytes.length / totalChunks);
-                        var currentChunk:int = 0;
-                        
-                        var t:Timer = new Timer(1000, totalChunks);
-                        t.addEventListener(TimerEvent.TIMER, function(te:TimerEvent):void {
-                            try {
-                                if (!client.connected) {
-                                    t.stop();
-                                    return;
-                                }
-                                var startPos:uint = currentChunk * chunkSize;
-                                var sendSize:uint = chunkSize;
-                                if (startPos + sendSize > bytes.length) {
-                                    sendSize = bytes.length - startPos;
-                                }
-                                if (sendSize > 0) {
-                                    client.writeBytes(bytes, startPos, sendSize);
-                                    client.flush();
-                                }
-                                currentChunk++;
-                            } catch(e:Error) {
-                                t.stop();
-                            }
-                        });
-                        t.addEventListener(TimerEvent.TIMER_COMPLETE, function(te:TimerEvent):void {
-                            setTimeout(closeClientSocket, 1500, client);
-                        });
-                        t.start();
-                    } else {
-                        client.writeBytes(bytes);
-                        client.flush();
-                        setTimeout(closeClientSocket, 1500, client);
-                    }
-                } else {
-                    log("404 Not Found: " + reqPath);
-                    var notFound:String = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-                    client.writeUTFBytes(notFound);
-                    client.flush();
-                    try { client.close(); } catch(e:Error) {}
-                }
-            } catch (err:Error) {
-                log("Socket Error: " + err.message);
-            }
-        }
-
-        private function closeClientSocket(client:Socket):void {
-            try {
-                if (client && client.connected) {
-                    client.close();
-                }
-            } catch(e:Error) {}
-        }
-
-        private function onClientClose(e:Event):void {
-            removeSocket(e.target as Socket);
-        }
-
-        private function onClientError(e:IOErrorEvent):void {
-            removeSocket(e.target as Socket);
-        }
-
-        private function removeSocket(client:Socket):void {
-            if (!client) return;
-            client.removeEventListener(ProgressEvent.SOCKET_DATA, onClientData);
-            client.removeEventListener(Event.CLOSE, onClientClose);
-            client.removeEventListener(IOErrorEvent.IO_ERROR, onClientError);
-            var index:int = activeSockets.indexOf(client);
-            if (index != -1) {
-                activeSockets.splice(index, 1);
-            }
         }
 
         private function setupExitButton():void {
@@ -297,7 +137,7 @@ package {
             tf.selectable = false;
             tf.mouseEnabled = false;
             exitButton.addChild(tf);
-            
+
             exitButton.x = stage.stageWidth > 0 ? stage.stageWidth - 90 : 1190;
             exitButton.y = 10;
             exitButton.mouseChildren = false;
@@ -307,21 +147,88 @@ package {
             addChild(exitButton);
         }
 
-        private function bringExitToFront():void {
+        private function setupAwakenButton():void {
+            if (awakenButton) {
+                awakenButton.removeEventListener(MouseEvent.CLICK, onAwakenClick);
+                if (contains(awakenButton)) removeChild(awakenButton);
+            }
+
+            awakenButton = new Sprite();
+            awakenButton.graphics.beginFill(0x00CC00, 1.0);
+            awakenButton.graphics.drawRoundRect(0, 0, 220, 80, 14);
+            awakenButton.graphics.endFill();
+
+            var tf:TextField = new TextField();
+            var fmt:TextFormat = new TextFormat("_sans", 38, 0xFFFFFF, true);
+            fmt.align = "center";
+            tf.defaultTextFormat = fmt;
+            tf.text = "AWAKEN";
+            tf.width = 220;
+            tf.height = 70;
+            tf.x = 0;
+            tf.y = 15;
+            tf.selectable = false;
+            tf.mouseEnabled = false;
+            awakenButton.addChild(tf);
+
+            awakenButton.x = 20;
+            awakenButton.y = 10;
+            awakenButton.mouseChildren = false;
+            awakenButton.mouseEnabled = true;
+            awakenButton.visible = false;
+            awakenButton.addEventListener(MouseEvent.CLICK, onAwakenClick);
+
+            addChild(awakenButton);
+        }
+
+        private function onAwakenClick(e:MouseEvent):void {
+            if (swfLoader && swfLoader.content) {
+                log("Executing Awakening Injection...");
+                var mc:* = swfLoader.content;
+                try {
+                    mc.dispatchEvent(new Event(Event.COMPLETE, true, false));
+                    mc.dispatchEvent(new Event("loadComplete", true, false));
+                    mc.dispatchEvent(new ProgressEvent(ProgressEvent.PROGRESS, false, false, 1000, 1000));
+                    
+                    var funcs:Array = ["init", "start", "startGame", "playGame", "completeLoad", "onLoadComplete", "main", "checkLoad"];
+                    for each (var fName:String in funcs) {
+                        if (mc.hasOwnProperty(fName) && typeof mc[fName] == "function") {
+                            mc[fName]();
+                            log("Injected call to: " + fName);
+                        }
+                    }
+                    
+                    mc.dispatchEvent(new MouseEvent(MouseEvent.CLICK, true, false, stage.stageWidth/2, stage.stageHeight/2));
+                    
+                    if (mc.hasOwnProperty("play")) {
+                        mc.play();
+                    }
+                    
+                    awakenButton.visible = false;
+                } catch(err:Error) {
+                    log("Awaken Failed: " + err.message);
+                }
+            }
+        }
+
+        private function bringUIFront():void {
             if (exitButton && contains(exitButton)) {
                 setChildIndex(exitButton, numChildren - 1);
+            }
+            if (awakenButton && contains(awakenButton)) {
+                setChildIndex(awakenButton, numChildren - 1);
             }
         }
 
         private function onExitClick(e:MouseEvent):void {
-            cleanupLoaders();
+            flushLog();
             NativeApplication.nativeApplication.exit(0);
         }
 
         private function setupFileManager():void {
             uiContainer = new Sprite();
             addChild(uiContainer);
-            bringExitToFront();
+            bringUIFront();
 
             listContainer = new Sprite();
             uiContainer.addChild(listContainer);
@@ -343,7 +250,7 @@ package {
 
             var yPos:Number = 0;
             var format:TextFormat = new TextFormat("_sans", 40, 0xFFFFFF, true);
-            
+
             if (dir.parent != null) {
                 var upBtn:Sprite = createListItem("[ .. GO UP .. ]", 0xFFFF00, format);
                 upBtn.y = yPos;
@@ -365,7 +272,7 @@ package {
 
                 folders.sortOn("name", Array.CASEINSENSITIVE);
                 swfs.sortOn("name", Array.CASEINSENSITIVE);
-                
+
                 for each (var folder:File in folders) {
                     var fBtn:Sprite = createListItem("[DIR] " + folder.name, 0xAAAAAA, format);
                     fBtn.y = yPos;
@@ -458,12 +365,13 @@ package {
                     currentDir = f;
                     renderDirectory(currentDir);
                 } else {
-                    loadGame(f);
+                    loadGame(f.url);
                 }
             }
         }
 
-        private function loadGame(file:File):void {
+        private function loadGame(url:String):void {
+            log("Loading: " + url);
             if (uiContainer && contains(uiContainer)) removeChild(uiContainer);
             stage.removeEventListener(MouseEvent.MOUSE_DOWN, onDown);
             stage.removeEventListener(MouseEvent.MOUSE_MOVE, onMove);
@@ -472,12 +380,32 @@ package {
             cleanupErrorUI();
             cleanupLoaders();
             
-            servingFile = file;
-            
-            var safeName:String = encodeURIComponent(file.name);
-            var url:String = "http://127.0.0.1:" + SERVER_PORT + "/" + safeName;
+            awakenButton.visible = false;
 
-            log("Loading from server: " + url);
+            urlLoader = new URLLoader();
+            urlLoader.dataFormat = URLLoaderDataFormat.BINARY;
+            urlLoader.addEventListener(Event.COMPLETE, onBytesReady);
+            urlLoader.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
+            urlLoader.load(new URLRequest(url));
+        }
+
+        private function onBytesReady(e:Event):void {
+            urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
+            urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+
+            var bytes:ByteArray = urlLoader.data as ByteArray;
+            urlLoader = null;
+
+            var writeOK:Boolean = false;
+            try {
+                var stream:FileStream = new FileStream();
+                stream.open(tempSWFFile, FileMode.WRITE);
+                stream.writeBytes(bytes);
+                stream.close();
+                writeOK = true;
+            } catch (err:Error) {
+                log("Write FAILED: " + err.message);
+            }
 
             var context:LoaderContext = new LoaderContext(false, ApplicationDomain.currentDomain);
             context.allowCodeImport = true;
@@ -485,15 +413,21 @@ package {
             swfLoader = new Loader();
             swfLoader.contentLoaderInfo.addEventListener(Event.COMPLETE, onGameLoaded);
             swfLoader.contentLoaderInfo.addEventListener(IOErrorEvent.IO_ERROR, onGameError);
-            swfLoader.load(new URLRequest(url), context);
-            
+
+            if (writeOK) {
+                setTimeout(function():void {
+                    swfLoader.load(new URLRequest(tempSWFFile.url), context);
+                }, 200);
+            } else {
+                swfLoader.loadBytes(bytes, context);
+            }
+
             addChild(swfLoader);
-            bringExitToFront();
+            bringUIFront();
         }
 
         private function onGameLoaded(e:Event):void {
             var info:LoaderInfo = e.target as LoaderInfo;
-            log("Game loaded successfully. URL: " + info.url);
             
             var fps:Number = info.frameRate;
             if (fps > 0 && fps <= 60) {
@@ -513,11 +447,13 @@ package {
             swfLoader.x = Math.round((screenW - gameW * scale) / 2);
             swfLoader.y = Math.round((screenH - gameH * scale) / 2);
 
-            bringExitToFront();
+            awakenButton.visible = true;
+            bringUIFront();
+            flushLog();
         }
 
         private function onGameError(e:IOErrorEvent):void {
-            log("Loader IO Error: " + e.text);
+            log("ERROR: " + e.text);
             cleanupLoaders();
             cleanupErrorUI();
             stage.frameRate = 60;
@@ -548,20 +484,27 @@ package {
             backTextField.addEventListener(MouseEvent.CLICK, onBackToMenu);
             addChild(backTextField);
 
-            bringExitToFront();
+            bringUIFront();
         }
 
         private function onBackToMenu(e:MouseEvent):void {
-            servingFile = null;
             cleanupLoaders();
             cleanupErrorUI();
+            awakenButton.visible = false;
             stage.frameRate = 60;
             while (numChildren > 0) removeChildAt(0);
             setupExitButton();
+            setupAwakenButton();
             setupFileManager();
         }
 
         private function cleanupLoaders():void {
+            if (urlLoader) {
+                urlLoader.removeEventListener(Event.COMPLETE, onBytesReady);
+                urlLoader.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
+                try { urlLoader.close(); } catch (e:Error) {}
+                urlLoader = null;
+            }
             if (swfLoader) {
                 swfLoader.contentLoaderInfo.removeEventListener(Event.COMPLETE, onGameLoaded);
                 swfLoader.contentLoaderInfo.removeEventListener(IOErrorEvent.IO_ERROR, onGameError);
@@ -569,14 +512,6 @@ package {
                 if (contains(swfLoader)) removeChild(swfLoader);
                 swfLoader = null;
             }
-            
-            for (var i:int = activeSockets.length - 1; i >= 0; i--) {
-                var client:Socket = activeSockets[i];
-                try {
-                    client.close();
-                } catch (e:Error) {}
-            }
-            activeSockets.length = 0;
         }
 
         private function cleanupErrorUI():void {

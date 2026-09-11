@@ -162,7 +162,10 @@ zipStorePath=wrapper/dists
 
 import android.os.Bundle
 import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
@@ -177,28 +180,42 @@ import java.util.zip.ZipInputStream
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusTextView: TextView
+    private lateinit var urlEditText: EditText
     private lateinit var startButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        val layout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(50, 100, 50, 100)
+        }
+
+        urlEditText = EditText(this).apply {
+            hint = "أدخل رابط ملف ZIP المباشر هنا"
+            textSize = 14f
+            setSingleLine(true)
         }
         
         statusTextView = TextView(this).apply {
-            text = "Ready to start streaming extraction."
+            text = "جاهز لبدء التنزيل والفك المباشر."
             textSize = 16f
+            setPadding(0, 30, 0, 30)
         }
         
         startButton = Button(this).apply {
-            text = "Start Download & Extract"
+            text = "بدء التنزيل والفك المباشر"
             setOnClickListener {
-                startStreamingExtraction("https://example.com/file.zip")
+                val url = urlEditText.text.toString().trim()
+                if (url.isEmpty()) {
+                    Toast.makeText(this@MainActivity, "الرجاء إدخال رابط صحيح", Toast.LENGTH_SHORT).show()
+                } else {
+                    startStreamingExtraction(url)
+                }
             }
         }
         
+        layout.addView(urlEditText)
         layout.addView(startButton)
         layout.addView(statusTextView)
         setContentView(layout)
@@ -206,14 +223,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun startStreamingExtraction(url: String) {
         lifecycleScope.launch(Dispatchers.IO) {
-            updateStatus("Connecting to server...")
+            updateStatus("جاري الاتصال بالخادم...")
             try {
                 val client = OkHttpClient()
                 val request = Request.Builder().url(url).build()
                 val response = client.newCall(request).execute()
 
                 if (!response.isSuccessful || response.body == null) {
-                    updateStatus("Failed: HTTP ${response.code}")
+                    updateStatus("فشل الاتصال: كود HTTP ${response.code}")
                     return@launch
                 }
 
@@ -230,7 +247,7 @@ class MainActivity : AppCompatActivity() {
                         val outputFile = File(targetDir, entry.name)
                         outputFile.parentFile?.mkdirs()
                         
-                        updateStatus("Extracting: ${entry.name}")
+                        updateStatus("جاري الفك: ${entry.name}")
                         FileOutputStream(outputFile).use { fos ->
                             var len: Int
                             while (zipInputStream.read(buffer).also { len = it } > 0) {
@@ -243,10 +260,10 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 zipInputStream.close()
-                updateStatus("Extraction complete successfully!")
+                updateStatus("تم استخراج الملف بنجاح وحفظه في التخزين!")
 
             } catch (e: Exception) {
-                updateStatus("Error: ${e.localizedMessage}")
+                updateStatus("خطأ: ${e.localizedMessage}")
             }
         }
     }

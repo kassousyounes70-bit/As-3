@@ -128,6 +128,7 @@ dependencies {
         android:label="StreamDownloader"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:requestLegacyExternalStorage="true"
         android:theme="@style/Theme.Material3.DayNight.NoActionBar">
         
         <activity
@@ -161,6 +162,7 @@ zipStorePath=wrapper/dists
         f.write('''package com.example.streamdownloader
 
 import android.os.Bundle
+import android.os.Environment
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -236,7 +238,10 @@ class MainActivity : AppCompatActivity() {
 
                 val inputStream = response.body!!.byteStream()
                 val zipInputStream = ZipInputStream(inputStream)
-                val targetDir = File(filesDir, "extracted")
+                
+                // Save directly to public Downloads folder
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val targetDir = File(downloadsDir, "StreamDownloader")
                 if (!targetDir.exists()) targetDir.mkdirs()
 
                 var entry = zipInputStream.nextEntry
@@ -247,7 +252,7 @@ class MainActivity : AppCompatActivity() {
                         val outputFile = File(targetDir, entry.name)
                         outputFile.parentFile?.mkdirs()
                         
-                        updateStatus("جاري الفك: ${entry.name}")
+                        updateStatus("جاري الفك في مجلد التحميلات: ${entry.name}")
                         FileOutputStream(outputFile).use { fos ->
                             var len: Int
                             while (zipInputStream.read(buffer).also { len = it } > 0) {
@@ -260,7 +265,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 zipInputStream.close()
-                updateStatus("تم استخراج الملف بنجاح وحفظه في التخزين!")
+                updateStatus("تم استخراج الملف بنجاح! تجده في مجلد التحميلات (Downloads/StreamDownloader)")
 
             } catch (e: Exception) {
                 updateStatus("خطأ: ${e.localizedMessage}")

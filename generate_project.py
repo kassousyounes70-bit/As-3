@@ -174,7 +174,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -331,8 +330,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private suspend fun updateUI(msg: String, progressVal: Int, showProgress: Boolean, isIndeterminate: Boolean = false) {
-        withContext(Dispatchers.Main) {
+    private fun updateUI(msg: String, progressVal: Int, showProgress: Boolean, isIndeterminate: Boolean = false) {
+        runOnUiThread {
             statusTextView.text = msg
             progressBar.visibility = if (showProgress) View.VISIBLE else View.GONE
             progressBar.isIndeterminate = isIndeterminate

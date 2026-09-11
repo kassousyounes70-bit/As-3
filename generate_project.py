@@ -163,9 +163,11 @@ zipStorePath=wrapper/dists
 
 import android.os.Bundle
 import android.os.Environment
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -177,13 +179,44 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.zip.ZipInputStream
+
+class CountingInputStream(
+    private val input: InputStream,
+    private val onBytesRead: (Long) -> Unit
+) : InputStream() {
+    private var totalRead: Long = 0
+
+    override fun read(): Int {
+        val b = input.read()
+        if (b != -1) {
+            totalRead++
+            onBytesRead(totalRead)
+        }
+        return b
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        val count = input.read(b, off, len)
+        if (count > 0) {
+            totalRead += count
+            onBytesRead(totalRead)
+        }
+        return count
+    }
+
+    override fun close() {
+        input.close()
+    }
+}
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var statusTextView: TextView
     private lateinit var urlEditText: EditText
     private lateinit var startButton: Button
+    private lateinit var progressBar: ProgressBar
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -199,12 +232,6 @@ class MainActivity : AppCompatActivity() {
             setSingleLine(true)
         }
         
-        statusTextView = TextView(this).apply {
-            text = "جاهز لبدء التنزيل والفك المباشر."
-            textSize = 16f
-            setPadding(0, 30, 0, 30)
-        }
-        
         startButton = Button(this).apply {
             text = "بدء التنزيل والفك المباشر"
             setOnClickListener {
@@ -216,30 +243,62 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+            visibility = View.GONE
+            setPadding(0, 30, 0, 30)
+        }
+        
+        statusTextView = TextView(this).apply {
+            text = "جاهز لبدء التنزيل والفك المباشر."
+            textSize = 16f
+            setPadding(0, 20, 0, 20)
+        }
         
         layout.addView(urlEditText)
         layout.addView(startButton)
+        layout.addView(progressBar)
         layout.addView(statusTextView)
         setContentView(layout)
     }
 
     private fun startStreamingExtraction(url: String) {
         lifecycleScope.launch(Dispatchers.IO) {
-            updateStatus("جاري الاتصال بالخادم...")
+            updateUI("جاري الاتصال بالخادم...", 0, showProgress = true, isIndeterminate = true)
             try {
                 val client = OkHttpClient()
                 val request = Request.Builder().url(url).build()
                 val response = client.newCall(request).execute()
 
                 if (!response.isSuccessful || response.body == null) {
-                    updateStatus("فشل الاتصال: كود HTTP ${response.code}")
+                    updateUI("فشل الاتصال: كود HTTP ${response.code}", 0, showProgress = false)
                     return@launch
                 }
 
-                val inputStream = response.body!!.byteStream()
-                val zipInputStream = ZipInputStream(inputStream)
+                val totalBytes = response.body!!.contentLength()
+                val rawInputStream = response.body!!.byteStream()
+
+                var lastUpdatedTime = 0L
+                val countingStream = CountingInputStream(rawInputStream) { bytesRead ->
+                    val currentTime = System.currentTimeMillis()
+                    if (currentTime - lastUpdatedTime > 100 || bytesRead == totalBytes) {
+                        lastUpdatedTime = currentTime
+                        if (totalBytes > 0) {
+                            val percent = ((bytesRead * 100) / totalBytes).toInt()
+                            val downloadedMB = String.format("%.2f", bytesRead / (1024.0 * 1024.0))
+                            val totalMB = String.format("%.2f", totalBytes / (1024.0 * 1024.0))
+                            updateUI("جاري التنزيل والفك: $percent% ($downloadedMB MB / $totalMB MB)", percent, showProgress = true, isIndeterminate = false)
+                        } else {
+                            val downloadedMB = String.format("%.2f", bytesRead / (1024.0 * 1024.0))
+                            updateUI("جاري التنزيل والفك: $downloadedMB MB", 0, showProgress = true, isIndeterminate = true)
+                        }
+                    }
+                }
+
+                val zipInputStream = ZipInputStream(countingStream)
                 
-                // Save directly to public Downloads folder
                 val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                 val targetDir = File(downloadsDir, "StreamDownloader")
                 if (!targetDir.exists()) targetDir.mkdirs()
@@ -252,7 +311,6 @@ class MainActivity : AppCompatActivity() {
                         val outputFile = File(targetDir, entry.name)
                         outputFile.parentFile?.mkdirs()
                         
-                        updateStatus("جاري الفك في مجلد التحميلات: ${entry.name}")
                         FileOutputStream(outputFile).use { fos ->
                             var len: Int
                             while (zipInputStream.read(buffer).also { len = it } > 0) {
@@ -265,23 +323,22 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 zipInputStream.close()
-                updateStatus("تم استخراج الملف بنجاح! تجده في مجلد التحميلات (Downloads/StreamDownloader)")
+                updateUI("تم استخراج الملف بنجاح! تجده في مجلد التحميلات (Downloads/StreamDownloader)", 100, showProgress = true, isIndeterminate = false)
 
             } catch (e: Exception) {
-                updateStatus("خطأ: ${e.localizedMessage}")
+                updateUI("خطأ: ${e.localizedMessage}", 0, showProgress = false)
             }
         }
     }
 
-    private suspend fun updateStatus(msg: String) {
+    private suspend fun updateUI(msg: String, progressVal: Int, showProgress: Boolean, isIndeterminate: Boolean = false) {
         withContext(Dispatchers.Main) {
             statusTextView.text = msg
+            progressBar.visibility = if (showProgress) View.VISIBLE else View.GONE
+            progressBar.isIndeterminate = isIndeterminate
+            if (!isIndeterminate) {
+                progressBar.progress = progressVal
+            }
         }
     }
 }
-''')
-
-    print("Project Scaffolding Generated Successfully!")
-
-if __name__ == "__main__":
-    setup_project()

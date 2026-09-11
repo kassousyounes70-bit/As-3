@@ -48,7 +48,7 @@ def setup_project():
         icon.save(f"app/src/main/res/{mipmap}/ic_launcher_round.png")
 
     with open("settings.gradle.kts", "w", encoding="utf-8") as f:
-        f.write('''pluginManagement {
+        f.write(r"""pluginManagement {
     repositories {
         google()
         mavenCentral()
@@ -64,17 +64,17 @@ dependencyResolutionManagement {
 }
 rootProject.name = "StreamDownloader"
 include(":app")
-''')
+""")
 
     with open("build.gradle.kts", "w", encoding="utf-8") as f:
-        f.write('''plugins {
+        f.write(r"""plugins {
     id("com.android.application") version "8.2.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.22" apply false
 }
-''')
+""")
 
     with open("app/build.gradle.kts", "w", encoding="utf-8") as f:
-        f.write('''plugins {
+        f.write(r"""plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
@@ -113,10 +113,10 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 }
-''')
+""")
 
     with open("app/src/main/AndroidManifest.xml", "w", encoding="utf-8") as f:
-        f.write('''<?xml version="1.0" encoding="utf-8"?>
+        f.write(r"""<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -142,24 +142,24 @@ dependencies {
     </application>
 
 </manifest>
-''')
+""")
 
     with open("gradle.properties", "w", encoding="utf-8") as f:
-        f.write('''org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+        f.write(r"""org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
 android.useAndroidX=true
 android.nonTransitiveRClass=true
-''')
+""")
 
     with open("gradle/wrapper/gradle-wrapper.properties", "w", encoding="utf-8") as f:
-        f.write('''distributionBase=GRADLE_USER_HOME
+        f.write(r"""distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
-distributionUrl=https\\://services.gradle.org/distributions/gradle-8.2-bin.zip
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
 zipStoreBase=GRADLE_USER_HOME
 zipStorePath=wrapper/dists
-''')
+""")
 
     with open("app/src/main/java/com/example/streamdownloader/MainActivity.kt", "w", encoding="utf-8") as f:
-        f.write('''package com.example.streamdownloader
+        f.write(r"""package com.example.streamdownloader
 
 import android.os.Bundle
 import android.os.Environment
@@ -342,3 +342,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 }
+""")
+
+    print("Project Scaffolding Generated Successfully!")
+
+if __name__ == "__main__":
+    setup_project()

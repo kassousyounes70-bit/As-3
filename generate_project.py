@@ -101,7 +101,7 @@ canvas {
 }
 """
 
-GAME_JS = """// Zombie Survival - Core Game Engine (MVP v2 - SIDE VIEW)
+GAME_JS = """// Zombie Survival - Core Game Engine (MVP v3 - richer pixel-art rendering)
 // Pixel-art style rendering via Canvas 2D - no external image assets.
 // Player always faces right (where zombies approach from) and visually
 // retreats to the left as the world scrolls past. Aim is forward-fixed
@@ -370,50 +370,84 @@ function drawPixelBlock(x, y, w, h, color) {
   ctx.fillRect(Math.round(x), Math.round(y), w, h);
 }
 
-function drawWalkingLegs(hipX, hipY, phase, color) {
-  const legLen = 15;
+// Draws a body part with a black pixel-art outline, a base fill color,
+// an optional darker shadow band, and an optional lighter highlight band.
+function part(x, y, w, h, fill, shadow, highlight) {
+  ctx.fillStyle = '#050505';
+  ctx.fillRect(Math.round(x - 1), Math.round(y - 1), w + 2, h + 2);
+
+  ctx.fillStyle = fill;
+  ctx.fillRect(Math.round(x), Math.round(y), w, h);
+
+  if (shadow) {
+    const sh = Math.max(1, Math.ceil(h / 3));
+    ctx.fillStyle = shadow;
+    ctx.fillRect(Math.round(x), Math.round(y + h - sh), w, sh);
+  }
+  if (highlight) {
+    const hh = Math.max(1, Math.round(h * 0.18));
+    ctx.fillStyle = highlight;
+    ctx.fillRect(Math.round(x), Math.round(y), w, hh);
+  }
+}
+
+function drawWalkingLegs(hipX, hipY, phase, colors) {
+  const legLen = 14;
   const swingA = Math.sin(phase) * 0.55;
   const swingB = Math.sin(phase + Math.PI) * 0.55;
   [swingA, swingB].forEach(ang => {
     ctx.save();
     ctx.translate(hipX, hipY);
     ctx.rotate(ang);
-    ctx.fillStyle = color;
-    ctx.fillRect(-3, 0, 6, legLen);
+    part(-3, 0, 6, legLen - 4, colors.main, colors.shadow, null);
+    part(-3, legLen - 6, 6, 6, colors.boot, colors.bootShadow, null);
     ctx.restore();
   });
 }
 
-// ---------- Background (parallax side-view) ----------
+// ---------- Background (parallax side-view, dusk apocalyptic palette) ----------
 function drawBackground(dt) {
-  ctx.fillStyle = '#0a0a0d';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const sky = ctx.createLinearGradient(0, 0, 0, groundY);
+  sky.addColorStop(0, '#1a1424');
+  sky.addColorStop(0.6, '#140e1a');
+  sky.addColorStop(1, '#0d0a10');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, canvas.width, groundY);
 
-  // distant skyline silhouette (slow layer)
+  ctx.fillStyle = 'rgba(230,220,200,0.16)';
+  ctx.beginPath();
+  ctx.arc(canvas.width * 0.82, groundY * 0.18, 28, 0, Math.PI * 2);
+  ctx.fill();
+
   state.farOffset = (state.farOffset - dt * 0.5) % 140;
-  ctx.fillStyle = '#141419';
   for (let x = state.farOffset - 140; x < canvas.width + 140; x += 140) {
-    drawPixelBlock(x, groundY - 70, 55, 70, '#141419');
-    drawPixelBlock(x + 65, groundY - 105, 38, 105, '#141419');
+    drawPixelBlock(x, groundY - 70, 55, 70, '#242434');
+    drawPixelBlock(x + 65, groundY - 105, 38, 105, '#1e1e2c');
+    ctx.fillStyle = 'rgba(255,196,90,0.55)';
+    ctx.fillRect(Math.round(x + 10), Math.round(groundY - 55), 5, 6);
+    ctx.fillRect(Math.round(x + 25), Math.round(groundY - 40), 5, 6);
+    ctx.fillRect(Math.round(x + 78), Math.round(groundY - 85), 5, 6);
   }
 
-  // mid debris layer (medium speed)
   state.midOffset = (state.midOffset - dt * 1.3) % 220;
   for (let x = state.midOffset - 220; x < canvas.width + 220; x += 220) {
-    drawPixelBlock(x, groundY - 18, 34, 18, '#1c1c22');
+    drawPixelBlock(x, groundY - 18, 34, 18, '#2c2c3a');
   }
 
-  // ground fill
-  drawPixelBlock(0, groundY, canvas.width, canvas.height - groundY, '#101012');
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  const groundGrad = ctx.createLinearGradient(0, groundY, 0, canvas.height);
+  groundGrad.addColorStop(0, '#1e1b20');
+  groundGrad.addColorStop(1, '#0a0909');
+  ctx.fillStyle = groundGrad;
+  ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
   ctx.beginPath();
   ctx.moveTo(0, groundY);
   ctx.lineTo(canvas.width, groundY);
   ctx.stroke();
 
-  // fast ground ticks (sells the retreat motion)
   state.groundOffset = (state.groundOffset - dt * 3.6) % 40;
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.09)';
   for (let x = state.groundOffset - 40; x < canvas.width + 40; x += 40) {
     ctx.beginPath();
     ctx.moveTo(x, groundY + 6);
@@ -421,13 +455,18 @@ function drawBackground(dt) {
     ctx.stroke();
   }
 
-  // vignette
+  const fog = ctx.createLinearGradient(0, groundY - 40, 0, groundY + 10);
+  fog.addColorStop(0, 'rgba(130,130,150,0)');
+  fog.addColorStop(1, 'rgba(130,130,150,0.14)');
+  ctx.fillStyle = fog;
+  ctx.fillRect(0, groundY - 40, canvas.width, 50);
+
   const g = ctx.createRadialGradient(
     canvas.width / 2, canvas.height / 2, canvas.height * 0.2,
-    canvas.width / 2, canvas.height / 2, canvas.height * 0.8
+    canvas.width / 2, canvas.height / 2, canvas.height * 0.85
   );
   g.addColorStop(0, 'rgba(0,0,0,0)');
-  g.addColorStop(1, 'rgba(0,0,0,0.6)');
+  g.addColorStop(1, 'rgba(0,0,0,0.5)');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
@@ -439,27 +478,45 @@ function drawObstacle() {
     if (flashOn) drawPixelBlock(ox, groundY - 8, 22, 8, 'rgba(255,180,0,0.6)');
   }
   if (obstacle.active) {
-    drawPixelBlock(ox, groundY - 20, 22, 20, '#4a3a2a');
+    part(ox, groundY - 20, 22, 20, '#4a3a2a', '#2c2214');
   }
 }
 
 function drawPlayer() {
   const hipX = player.x, hipY = player.y - 15;
-  const bodyColor = player.health < 40 ? '#7a3030' : '#2f5d8a';
+  const jacket = player.health < 40 ? '#8a3b3b' : '#2f5d8a';
+  const jacketShadow = player.health < 40 ? '#5c2626' : '#1f3f5c';
+  const jacketHi = player.health < 40 ? '#b96565' : '#4a7aab';
 
-  if (!player.jumping) drawWalkingLegs(hipX - 2, hipY, player.walkPhase, '#20364d');
-  else drawPixelBlock(hipX - 8, hipY, 6, 12, '#20364d');
+  if (!player.jumping) {
+    drawWalkingLegs(hipX - 2, hipY, player.walkPhase, {
+      main: '#20364d', shadow: '#15242f', boot: '#14181b', bootShadow: '#0a0d0f'
+    });
+  } else {
+    part(hipX - 9, hipY, 7, 13, '#20364d', '#15242f');
+    part(hipX + 2, hipY, 7, 13, '#20364d', '#15242f');
+  }
 
-  drawPixelBlock(hipX - 8, hipY - 20, 16, 20, bodyColor);
-  drawPixelBlock(hipX - 6, hipY - 30, 12, 10, '#e0b089');
+  part(hipX - 8, hipY - 20, 16, 20, jacket, jacketShadow, jacketHi);
+
+  ctx.fillStyle = '#aa3333';
+  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 19), 4, 3);
+
+  part(hipX - 6, hipY - 30, 12, 10, '#e0a878', '#b98a5e');
+  part(hipX - 6, hipY - 33, 12, 4, '#2a1f16', '#181110');
+
+  ctx.fillStyle = '#111';
+  ctx.fillRect(Math.round(hipX + 2), Math.round(hipY - 26), 2, 2);
 
   const angle = player.aimTilt * 0.6;
   ctx.save();
   ctx.translate(hipX + 6, hipY - 14);
   ctx.rotate(angle);
-  drawPixelBlock(-player.recoil, -2, 22, 4, '#333');
+  part(-player.recoil, -3, 10, 6, '#c99a70', '#8a6644');
+  part(6 - player.recoil, -2, 18, 4, '#3a3a3a', '#181818');
   if (player.recoil > 4) {
-    drawPixelBlock(20 - player.recoil, -4, 6, 8, 'rgba(255,220,120,0.9)');
+    ctx.fillStyle = 'rgba(255,220,120,0.9)';
+    ctx.fillRect(Math.round(22 - player.recoil), -4, 6, 8);
   }
   ctx.restore();
 }
@@ -467,19 +524,38 @@ function drawPlayer() {
 function drawZombie(z) {
   const hipX = z.x, hipY = z.y - 15;
   const flash = z.hitFlash > 0;
-  const bodyColor = flash ? '#ffffff' : '#3f6b3a';
+  const skin = flash ? '#ffffff' : '#4d7a46';
+  const skinShadow = flash ? '#dddddd' : '#2e4d2a';
+  const skinHi = flash ? null : '#6a9861';
 
-  drawWalkingLegs(hipX + 2, hipY, z.walkPhase, flash ? '#fff' : '#2e4d2a');
-  drawPixelBlock(hipX - 8, hipY - 20, 16, 20, bodyColor);
-  drawPixelBlock(hipX - 6, hipY - 30, 12, 10, flash ? '#fff' : '#4d7a46');
-  drawPixelBlock(hipX - 6, hipY - 27, 2, 2, '#ff2020');
-  drawPixelBlock(hipX - 2, hipY - 27, 2, 2, '#ff2020');
+  drawWalkingLegs(hipX + 2, hipY, z.walkPhase, {
+    main: flash ? '#eeeeee' : '#3a3830',
+    shadow: flash ? '#cccccc' : '#221f1a',
+    boot: '#161616', bootShadow: '#0a0a0a'
+  });
+
+  part(hipX - 8, hipY - 20, 16, 20, skin, skinShadow, skinHi);
+
+  if (!flash) {
+    ctx.fillStyle = '#3a3830';
+    ctx.fillRect(Math.round(hipX - 6), Math.round(hipY - 14), 6, 8);
+    ctx.fillStyle = '#4a0f0f';
+    ctx.fillRect(Math.round(hipX + 2), Math.round(hipY - 10), 4, 4);
+  }
+
+  part(hipX - 6, hipY - 30, 12, 10, skin, skinShadow);
+
+  ctx.fillStyle = 'rgba(255,40,40,0.28)';
+  ctx.fillRect(Math.round(hipX - 7), Math.round(hipY - 28), 7, 4);
+  ctx.fillStyle = '#ff2b2b';
+  ctx.fillRect(Math.round(hipX - 6), Math.round(hipY - 27), 2, 2);
+  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 27), 2, 2);
 
   const w = 20;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(hipX - w / 2, hipY - 38, w, 3);
+  ctx.fillRect(hipX - w / 2, hipY - 40, w, 3);
   ctx.fillStyle = '#c0392b';
-  ctx.fillRect(hipX - w / 2, hipY - 38, w * Math.max(z.hp / z.maxHp, 0), 3);
+  ctx.fillRect(hipX - w / 2, hipY - 40, w * Math.max(z.hp / z.maxHp, 0), 3);
 }
 
 function drawBullets() {

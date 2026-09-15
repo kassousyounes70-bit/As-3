@@ -1,9 +1,9 @@
 """
 generate_project.py
 --------------------
-Generates the full web-game project (Zombie Survival, pixel-art, SIDE-VIEW)
-that will later be wrapped into an Android app via Capacitor in the
-GitHub Actions build workflow (build.yml).
+Generates the full web-game project (Zombie Survival, pixel-art, SIDE-VIEW).
+This script's ONLY job is to build the project's file structure on disk -
+the game logic itself now lives in separate, focused JS files under www/js/.
 
 Run this file (python generate_project.py) inside the repo root.
 It writes:
@@ -11,7 +11,13 @@ It writes:
   - capacitor.config.json
   - www/index.html
   - www/style.css
-  - www/game.js
+  - www/js/utils.js       (shared pixel-art drawing helpers)
+  - www/js/world.js       (maps / background / parallax scrolling)
+  - www/js/weapons.js     (weapon configs + firing)
+  - www/js/player.js      (the player character)
+  - www/js/zombie.js      (zombies)
+  - www/js/obstacles.js   (wall-jump obstacle + security-code gate obstacle)
+  - www/js/game.js        (main loop, input, HUD, glue code)
 """
 
 import os
@@ -35,13 +41,29 @@ INDEX_HTML = """<!DOCTYPE html>
 <button id="weapon-switch">Switch Weapon</button>
 <button id="jump-btn" style="display:none;">JUMP!</button>
 
+<div id="code-pad" style="display:none;">
+  <div id="code-target"></div>
+  <div id="code-buttons">
+    <button class="code-btn"></button>
+    <button class="code-btn"></button>
+    <button class="code-btn"></button>
+    <button class="code-btn"></button>
+  </div>
+</div>
+
 <div id="gameover" style="display:none;">
   <h1>GAME OVER</h1>
   <p id="final-score"></p>
   <button id="restart-btn">Restart</button>
 </div>
 
-<script src="game.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/world.js"></script>
+<script src="js/weapons.js"></script>
+<script src="js/player.js"></script>
+<script src="js/zombie.js"></script>
+<script src="js/obstacles.js"></script>
+<script src="js/game.js"></script>
 </body>
 </html>
 """
@@ -89,6 +111,19 @@ canvas {
   from { transform: scale(1); }
   to { transform: scale(1.08); }
 }
+#code-pad {
+  position: fixed; bottom: 24px; left: 20px; right: 20px;
+  z-index: 6; color: #fff; text-align: center;
+}
+#code-target {
+  font-size: 20px; font-weight: bold; margin-bottom: 8px;
+  text-shadow: 0 0 6px #000;
+}
+#code-buttons { display: flex; justify-content: center; gap: 10px; }
+.code-btn {
+  width: 52px; height: 52px; border-radius: 8px; border: none;
+  background: rgba(255,255,255,0.18); color: #fff; font-size: 20px; font-weight: bold;
+}
 #gameover {
   position: fixed; inset: 0; background: rgba(0,0,0,0.88);
   color: #fff; display: flex; flex-direction: column;
@@ -101,270 +136,9 @@ canvas {
 }
 """
 
-GAME_JS = """// Zombie Survival - Core Game Engine (MVP v3 - richer pixel-art rendering)
-// Pixel-art style rendering via Canvas 2D - no external image assets.
-// Player always faces right (where zombies approach from) and visually
-// retreats to the left as the world scrolls past. Aim is forward-fixed
-// with a vertical tilt controlled by touch position.
+UTILS_JS = """// Shared pixel-art drawing helpers used by world.js, player.js,
+// zombie.js and obstacles.js. Relies on the global `ctx` created in game.js.
 
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-
-let groundY = 0;
-
-function resize() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-  groundY = canvas.height * 0.72;
-  placePlayer();
-}
-window.addEventListener('resize', resize);
-
-// ---------- Game State ----------
-const state = {
-  running: true,
-  startTime: performance.now(),
-  lastSpawn: 0,
-  score: 0,
-  farOffset: 0,
-  midOffset: 0,
-  groundOffset: 0,
-};
-
-const player = {
-  x: 0, y: 0,
-  health: 100,
-  maxHealth: 100,
-  weapon: 'pistol',
-  lastFire: 0,
-  aimTilt: 0,     // -1 (up) .. 1 (down)
-  recoil: 0,
-  walkPhase: 0,
-  jumping: false,
-  jumpVel: 0,
-};
-
-function placePlayer() {
-  player.x = canvas.width * 0.24;
-  player.y = groundY;
-}
-resize();
-
-const bullets = [];
-const zombies = [];
-const particles = [];
-
-// ---------- Weapons (forward-fixed direction, vertical spread only) ----------
-const WEAPONS = {
-  pistol:  { fireRate: 260, bulletSpeed: 12, damage: 34, spreadCount: 1, spreadAngle: 0 },
-  shotgun: { fireRate: 650, bulletSpeed: 10, damage: 20, spreadCount: 4, spreadAngle: 0.16 },
-};
-
-let aiming = false;
-
-function updateAimFromTouch(y) {
-  const centerY = player.y - 30;
-  const range = canvas.height * 0.32;
-  let tilt = (y - centerY) / range;
-  if (tilt < -1) tilt = -1;
-  if (tilt > 1) tilt = 1;
-  player.aimTilt = tilt;
-}
-
-function fireWeapon(now) {
-  const w = WEAPONS[player.weapon];
-  if (now - player.lastFire < w.fireRate) return;
-  player.lastFire = now;
-  player.recoil = 8;
-
-  const baseAngle = player.aimTilt * 0.6;
-  const muzzleX = player.x + 24;
-  const muzzleY = player.y - 20;
-
-  const half = (w.spreadCount - 1) / 2;
-  for (let i = 0; i < w.spreadCount; i++) {
-    const angle = baseAngle + (i - half) * w.spreadAngle;
-    bullets.push({
-      x: muzzleX, y: muzzleY,
-      vx: Math.cos(angle) * w.bulletSpeed,
-      vy: Math.sin(angle) * w.bulletSpeed,
-      damage: w.damage,
-      life: 90,
-    });
-  }
-}
-
-// ---------- Input ----------
-function pointerDown(y) { aiming = true; updateAimFromTouch(y); }
-function pointerMove(y) { if (aiming) updateAimFromTouch(y); }
-function pointerUp() { aiming = false; }
-
-canvas.addEventListener('touchstart', e => {
-  pointerDown(e.touches[0].clientY);
-  e.preventDefault();
-}, { passive: false });
-
-canvas.addEventListener('touchmove', e => {
-  pointerMove(e.touches[0].clientY);
-  e.preventDefault();
-}, { passive: false });
-
-canvas.addEventListener('touchend', () => pointerUp(), { passive: false });
-
-canvas.addEventListener('mousedown', e => pointerDown(e.clientY));
-canvas.addEventListener('mousemove', e => pointerMove(e.clientY));
-window.addEventListener('mouseup', pointerUp);
-
-document.getElementById('weapon-switch').addEventListener('click', () => {
-  player.weapon = player.weapon === 'pistol' ? 'shotgun' : 'pistol';
-});
-
-// ---------- Jump ----------
-function startJump() {
-  if (!player.jumping) {
-    player.jumping = true;
-    player.jumpVel = -9;
-  }
-}
-
-function updateJump(dt) {
-  if (player.jumping) {
-    player.y += player.jumpVel * dt;
-    player.jumpVel += 0.55 * dt;
-    if (player.y >= groundY) {
-      player.y = groundY;
-      player.jumping = false;
-      player.jumpVel = 0;
-    }
-  }
-}
-
-// ---------- Zombies (approach from the right only, for now) ----------
-function spawnZombie() {
-  const elapsedMin = (performance.now() - state.startTime) / 60000;
-  const speedBonus = Math.min(elapsedMin * 0.12, 1.0);
-  const hpBonus = Math.min(elapsedMin * 8, 60);
-
-  zombies.push({
-    x: canvas.width + 30,
-    y: groundY,
-    speed: 1.1 + Math.random() * 0.4 + speedBonus,
-    hp: 40 + hpBonus,
-    maxHp: 40 + hpBonus,
-    hitFlash: 0,
-    walkPhase: Math.random() * Math.PI * 2,
-  });
-}
-
-function updateZombies(dt) {
-  zombies.forEach(z => {
-    z.walkPhase += dt * 0.18 * z.speed;
-    const dx = player.x - z.x;
-    const dist = Math.abs(dx);
-    if (dist > 34) {
-      z.x += (dx / dist) * z.speed * dt;
-    } else {
-      player.health -= 0.35 * dt;
-    }
-    if (z.hitFlash > 0) z.hitFlash -= dt;
-  });
-}
-
-// ---------- Obstacles (emerge from behind, where the player is retreating into) ----------
-const obstacle = {
-  active: false,
-  warning: false,
-  timer: 0,
-  nextIn: 12000 + Math.random() * 6000,
-};
-
-document.getElementById('jump-btn').addEventListener('click', () => {
-  startJump();
-  if (obstacle.active) {
-    obstacle.active = false;
-    document.getElementById('jump-btn').style.display = 'none';
-  }
-});
-
-function updateObstacle(dt) {
-  if (!obstacle.active && !obstacle.warning) {
-    obstacle.timer += dt * 16.6;
-    if (obstacle.timer > obstacle.nextIn) {
-      obstacle.warning = true;
-      obstacle.timer = 0;
-    }
-  } else if (obstacle.warning) {
-    obstacle.timer += dt * 16.6;
-    if (obstacle.timer > 1400) {
-      obstacle.warning = false;
-      obstacle.active = true;
-      obstacle.timer = 0;
-      document.getElementById('jump-btn').style.display = 'block';
-    }
-  } else if (obstacle.active) {
-    obstacle.timer += dt * 16.6;
-    if (obstacle.timer > 1800) {
-      player.health -= 22;
-      obstacle.active = false;
-      obstacle.timer = 0;
-      obstacle.nextIn = 12000 + Math.random() * 6000;
-      document.getElementById('jump-btn').style.display = 'none';
-      spawnBlood(player.x - 20, player.y - 5, 8);
-    }
-  }
-}
-
-// ---------- Particles (blood) ----------
-function spawnBlood(x, y, count) {
-  for (let i = 0; i < count; i++) {
-    const a = Math.random() * Math.PI * 2;
-    const s = 1 + Math.random() * 3;
-    particles.push({
-      x, y,
-      vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-      life: 30 + Math.random() * 20,
-      size: 2 + Math.random() * 2,
-    });
-  }
-}
-
-function updateParticles(dt) {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.x += p.vx * dt; p.y += p.vy * dt;
-    p.vx *= 0.94; p.vy *= 0.94;
-    p.life -= dt;
-    if (p.life <= 0) particles.splice(i, 1);
-  }
-}
-
-// ---------- Bullets vs Zombies ----------
-function updateBullets(dt) {
-  for (let i = bullets.length - 1; i >= 0; i--) {
-    const b = bullets[i];
-    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
-    if (b.life <= 0 || b.x > canvas.width + 40 || b.y < -40 || b.y > canvas.height + 40) {
-      bullets.splice(i, 1); continue;
-    }
-    for (let j = zombies.length - 1; j >= 0; j--) {
-      const z = zombies[j];
-      if (Math.hypot(z.x - b.x, (z.y - 16) - b.y) < 18) {
-        z.hp -= b.damage;
-        z.hitFlash = 6;
-        spawnBlood(b.x, b.y, 4);
-        bullets.splice(i, 1);
-        if (z.hp <= 0) {
-          spawnBlood(z.x, z.y - 14, 14);
-          zombies.splice(j, 1);
-          state.score += 10;
-        }
-        break;
-      }
-    }
-  }
-}
-
-// ---------- Rendering helpers ----------
 function drawPixelBlock(x, y, w, h, color) {
   ctx.fillStyle = color;
   ctx.fillRect(Math.round(x), Math.round(y), w, h);
@@ -405,7 +179,30 @@ function drawWalkingLegs(hipX, hipY, phase, colors) {
   });
 }
 
-// ---------- Background (parallax side-view, dusk apocalyptic palette) ----------
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+  }
+}
+"""
+
+WORLD_JS = """// World / maps - side-view parallax background.
+// The world scrolls to the RIGHT, because the player is retreating to the
+// LEFT: relative to the player, everything else drifts the opposite way.
+
+let groundY = 0;
+
+const world = {
+  farOffset: 0,
+  midOffset: 0,
+  groundOffset: 0,
+};
+
+function computeGroundY() {
+  groundY = canvas.height * 0.72;
+}
+
 function drawBackground(dt) {
   const sky = ctx.createLinearGradient(0, 0, 0, groundY);
   sky.addColorStop(0, '#1a1424');
@@ -419,8 +216,8 @@ function drawBackground(dt) {
   ctx.arc(canvas.width * 0.82, groundY * 0.18, 28, 0, Math.PI * 2);
   ctx.fill();
 
-  state.farOffset = (state.farOffset - dt * 0.5) % 140;
-  for (let x = state.farOffset - 140; x < canvas.width + 140; x += 140) {
+  world.farOffset = (world.farOffset + dt * 0.5) % 140;
+  for (let x = world.farOffset - 140; x < canvas.width + 140; x += 140) {
     drawPixelBlock(x, groundY - 70, 55, 70, '#242434');
     drawPixelBlock(x + 65, groundY - 105, 38, 105, '#1e1e2c');
     ctx.fillStyle = 'rgba(255,196,90,0.55)';
@@ -429,8 +226,8 @@ function drawBackground(dt) {
     ctx.fillRect(Math.round(x + 78), Math.round(groundY - 85), 5, 6);
   }
 
-  state.midOffset = (state.midOffset - dt * 1.3) % 220;
-  for (let x = state.midOffset - 220; x < canvas.width + 220; x += 220) {
+  world.midOffset = (world.midOffset + dt * 1.3) % 220;
+  for (let x = world.midOffset - 220; x < canvas.width + 220; x += 220) {
     drawPixelBlock(x, groundY - 18, 34, 18, '#2c2c3a');
   }
 
@@ -446,12 +243,12 @@ function drawBackground(dt) {
   ctx.lineTo(canvas.width, groundY);
   ctx.stroke();
 
-  state.groundOffset = (state.groundOffset - dt * 3.6) % 40;
+  world.groundOffset = (world.groundOffset + dt * 3.6) % 40;
   ctx.strokeStyle = 'rgba(255,255,255,0.09)';
-  for (let x = state.groundOffset - 40; x < canvas.width + 40; x += 40) {
+  for (let x = world.groundOffset - 40; x < canvas.width + 40; x += 40) {
     ctx.beginPath();
     ctx.moveTo(x, groundY + 6);
-    ctx.lineTo(x - 12, canvas.height);
+    ctx.lineTo(x + 12, canvas.height);
     ctx.stroke();
   }
 
@@ -470,15 +267,85 @@ function drawBackground(dt) {
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 }
+"""
 
-function drawObstacle() {
-  const ox = player.x - 55;
-  if (obstacle.warning) {
-    const flashOn = Math.floor(performance.now() / 150) % 2 === 0;
-    if (flashOn) drawPixelBlock(ox, groundY - 8, 22, 8, 'rgba(255,180,0,0.6)');
+WEAPONS_JS = """// Weapons - the aim direction is forward-fixed; only the vertical tilt
+// (set by touch position) changes where bullets go.
+
+const WEAPONS = {
+  pistol:  { fireRate: 260, bulletSpeed: 12, damage: 34, spreadCount: 1, spreadAngle: 0 },
+  shotgun: { fireRate: 650, bulletSpeed: 10, damage: 20, spreadCount: 4, spreadAngle: 0.16 },
+};
+
+function fireWeapon(now) {
+  const w = WEAPONS[player.weapon];
+  if (now - player.lastFire < w.fireRate) return;
+  player.lastFire = now;
+  player.recoil = 8;
+
+  const baseAngle = player.aimTilt * 0.6;
+  const muzzleX = player.x + 24;
+  const muzzleY = player.y - 20;
+
+  const half = (w.spreadCount - 1) / 2;
+  for (let i = 0; i < w.spreadCount; i++) {
+    const angle = baseAngle + (i - half) * w.spreadAngle;
+    bullets.push({
+      x: muzzleX, y: muzzleY,
+      vx: Math.cos(angle) * w.bulletSpeed,
+      vy: Math.sin(angle) * w.bulletSpeed,
+      damage: w.damage,
+      life: 90,
+    });
   }
-  if (obstacle.active) {
-    part(ox, groundY - 20, 22, 20, '#4a3a2a', '#2c2214');
+}
+"""
+
+PLAYER_JS = """// The player character: movement (retreat + jump), aiming and drawing.
+
+const player = {
+  x: 0, y: 0,
+  health: 100,
+  maxHealth: 100,
+  weapon: 'pistol',
+  lastFire: 0,
+  aimTilt: 0,     // -1 (up) .. 1 (down)
+  recoil: 0,
+  walkPhase: 0,
+  jumping: false,
+  jumpVel: 0,
+};
+
+function placePlayer() {
+  player.x = canvas.width * 0.24;
+  player.y = groundY;
+}
+
+function updateAimFromTouch(y) {
+  const centerY = player.y - 30;
+  const range = canvas.height * 0.32;
+  let tilt = (y - centerY) / range;
+  if (tilt < -1) tilt = -1;
+  if (tilt > 1) tilt = 1;
+  player.aimTilt = tilt;
+}
+
+function startJump() {
+  if (!player.jumping) {
+    player.jumping = true;
+    player.jumpVel = -9;
+  }
+}
+
+function updateJump(dt) {
+  if (player.jumping) {
+    player.y += player.jumpVel * dt;
+    player.jumpVel += 0.55 * dt;
+    if (player.y >= groundY) {
+      player.y = groundY;
+      player.jumping = false;
+      player.jumpVel = 0;
+    }
   }
 }
 
@@ -497,20 +364,22 @@ function drawPlayer() {
     part(hipX + 2, hipY, 7, 13, '#20364d', '#15242f');
   }
 
-  part(hipX - 8, hipY - 20, 16, 20, jacket, jacketShadow, jacketHi);
+  const bob = player.jumping ? 0 : Math.abs(Math.sin(player.walkPhase)) * 1.5;
+
+  part(hipX - 8, hipY - 20 - bob, 16, 20, jacket, jacketShadow, jacketHi);
 
   ctx.fillStyle = '#aa3333';
-  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 19), 4, 3);
+  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 19 - bob), 4, 3);
 
-  part(hipX - 6, hipY - 30, 12, 10, '#e0a878', '#b98a5e');
-  part(hipX - 6, hipY - 33, 12, 4, '#2a1f16', '#181110');
+  part(hipX - 6, hipY - 30 - bob, 12, 10, '#e0a878', '#b98a5e');
+  part(hipX - 6, hipY - 33 - bob, 12, 4, '#2a1f16', '#181110');
 
   ctx.fillStyle = '#111';
-  ctx.fillRect(Math.round(hipX + 2), Math.round(hipY - 26), 2, 2);
+  ctx.fillRect(Math.round(hipX + 2), Math.round(hipY - 26 - bob), 2, 2);
 
   const angle = player.aimTilt * 0.6;
   ctx.save();
-  ctx.translate(hipX + 6, hipY - 14);
+  ctx.translate(hipX + 6, hipY - 14 - bob);
   ctx.rotate(angle);
   part(-player.recoil, -3, 10, 6, '#c99a70', '#8a6644');
   part(6 - player.recoil, -2, 18, 4, '#3a3a3a', '#181818');
@@ -520,6 +389,41 @@ function drawPlayer() {
   }
   ctx.restore();
 }
+"""
+
+ZOMBIE_JS = """// Zombies: spawning, approach behaviour, and drawing.
+
+const zombies = [];
+
+function spawnZombie() {
+  const elapsedMin = (performance.now() - state.startTime) / 60000;
+  const speedBonus = Math.min(elapsedMin * 0.12, 1.0);
+  const hpBonus = Math.min(elapsedMin * 8, 60);
+
+  zombies.push({
+    x: canvas.width + 30,
+    y: groundY,
+    speed: 1.1 + Math.random() * 0.4 + speedBonus,
+    hp: 40 + hpBonus,
+    maxHp: 40 + hpBonus,
+    hitFlash: 0,
+    walkPhase: Math.random() * Math.PI * 2,
+  });
+}
+
+function updateZombies(dt) {
+  zombies.forEach(z => {
+    z.walkPhase += dt * 0.18 * z.speed;
+    const dx = player.x - z.x;
+    const dist = Math.abs(dx);
+    if (dist > 34) {
+      z.x += (dx / dist) * z.speed * dt;
+    } else {
+      player.health -= 0.35 * dt;
+    }
+    if (z.hitFlash > 0) z.hitFlash -= dt;
+  });
+}
 
 function drawZombie(z) {
   const hipX = z.x, hipY = z.y - 15;
@@ -527,6 +431,7 @@ function drawZombie(z) {
   const skin = flash ? '#ffffff' : '#4d7a46';
   const skinShadow = flash ? '#dddddd' : '#2e4d2a';
   const skinHi = flash ? null : '#6a9861';
+  const bob = Math.abs(Math.sin(z.walkPhase)) * 1.2;
 
   drawWalkingLegs(hipX + 2, hipY, z.walkPhase, {
     main: flash ? '#eeeeee' : '#3a3830',
@@ -534,32 +439,231 @@ function drawZombie(z) {
     boot: '#161616', bootShadow: '#0a0a0a'
   });
 
-  part(hipX - 8, hipY - 20, 16, 20, skin, skinShadow, skinHi);
+  // a loosely swinging arm reads much more like an undead gait than a static one
+  ctx.save();
+  ctx.translate(hipX - 6, hipY - 16 - bob);
+  ctx.rotate(0.4 + Math.sin(z.walkPhase) * 0.15);
+  part(-2, 0, 5, 12, flash ? '#eee' : '#3a5a35', flash ? '#ccc' : '#233b20');
+  ctx.restore();
+
+  part(hipX - 8, hipY - 20 - bob, 16, 20, skin, skinShadow, skinHi);
 
   if (!flash) {
     ctx.fillStyle = '#3a3830';
-    ctx.fillRect(Math.round(hipX - 6), Math.round(hipY - 14), 6, 8);
+    ctx.fillRect(Math.round(hipX - 6), Math.round(hipY - 14 - bob), 6, 8);
     ctx.fillStyle = '#4a0f0f';
-    ctx.fillRect(Math.round(hipX + 2), Math.round(hipY - 10), 4, 4);
+    ctx.fillRect(Math.round(hipX + 2), Math.round(hipY - 10 - bob), 4, 4);
   }
 
-  part(hipX - 6, hipY - 30, 12, 10, skin, skinShadow);
+  part(hipX - 6, hipY - 30 - bob, 12, 10, skin, skinShadow);
 
   ctx.fillStyle = 'rgba(255,40,40,0.28)';
-  ctx.fillRect(Math.round(hipX - 7), Math.round(hipY - 28), 7, 4);
+  ctx.fillRect(Math.round(hipX - 7), Math.round(hipY - 28 - bob), 7, 4);
   ctx.fillStyle = '#ff2b2b';
-  ctx.fillRect(Math.round(hipX - 6), Math.round(hipY - 27), 2, 2);
-  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 27), 2, 2);
+  ctx.fillRect(Math.round(hipX - 6), Math.round(hipY - 27 - bob), 2, 2);
+  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 27 - bob), 2, 2);
 
   const w = 20;
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
-  ctx.fillRect(hipX - w / 2, hipY - 40, w, 3);
+  ctx.fillRect(hipX - w / 2, hipY - 40 - bob, w, 3);
   ctx.fillStyle = '#c0392b';
-  ctx.fillRect(hipX - w / 2, hipY - 40, w * Math.max(z.hp / z.maxHp, 0), 3);
+  ctx.fillRect(hipX - w / 2, hipY - 40 - bob, w * Math.max(z.hp / z.maxHp, 0), 3);
+}
+"""
+
+OBSTACLES_JS = """// Obstacles that appear behind the retreating player (off to the left,
+// where the player cannot see). Two kinds for now:
+//   - 'wall'  : tap JUMP in time
+//   - 'gate'  : a locked gate - enter the 3-digit security code in time
+
+const obstacle = {
+  type: null,
+  active: false,
+  warning: false,
+  timer: 0,
+  nextIn: 12000 + Math.random() * 6000,
+  codeSequence: [],
+  codeProgress: 0,
+};
+
+function beginObstacle() {
+  obstacle.type = Math.random() < 0.5 ? 'wall' : 'gate';
+  if (obstacle.type === 'wall') {
+    document.getElementById('jump-btn').style.display = 'block';
+  } else {
+    setupGateUI();
+  }
 }
 
-function drawBullets() {
-  bullets.forEach(b => drawPixelBlock(b.x - 2, b.y - 2, 5, 3, '#ffe89b'));
+function setupGateUI() {
+  const pool = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  shuffleArray(pool);
+  const correct = pool.slice(0, 3);
+  const decoy = pool[3];
+  const buttons = correct.concat([decoy]);
+  shuffleArray(buttons);
+
+  obstacle.codeSequence = correct;
+  obstacle.codeProgress = 0;
+
+  document.getElementById('code-target').textContent = correct.join(' - ');
+  const btns = document.querySelectorAll('.code-btn');
+  btns.forEach((b, i) => {
+    b.textContent = buttons[i];
+    b.onclick = () => handleCodeTap(buttons[i]);
+  });
+  document.getElementById('code-pad').style.display = 'block';
+}
+
+function handleCodeTap(digit) {
+  if (digit === obstacle.codeSequence[obstacle.codeProgress]) {
+    obstacle.codeProgress++;
+    if (obstacle.codeProgress >= obstacle.codeSequence.length) {
+      resolveObstacle();
+    }
+  } else {
+    obstacle.codeProgress = 0;
+  }
+}
+
+function resolveObstacle() {
+  if (obstacle.type === 'wall') startJump();
+  obstacle.active = false;
+  obstacle.timer = 0;
+  obstacle.nextIn = 12000 + Math.random() * 6000;
+  document.getElementById('jump-btn').style.display = 'none';
+  document.getElementById('code-pad').style.display = 'none';
+}
+
+document.getElementById('jump-btn').addEventListener('click', () => {
+  if (obstacle.active && obstacle.type === 'wall') resolveObstacle();
+  else startJump();
+});
+
+function updateObstacle(dt) {
+  if (!obstacle.active && !obstacle.warning) {
+    obstacle.timer += dt * 16.6;
+    if (obstacle.timer > obstacle.nextIn) {
+      obstacle.warning = true;
+      obstacle.timer = 0;
+    }
+  } else if (obstacle.warning) {
+    obstacle.timer += dt * 16.6;
+    if (obstacle.timer > 1400) {
+      obstacle.warning = false;
+      obstacle.active = true;
+      obstacle.timer = 0;
+      beginObstacle();
+    }
+  } else if (obstacle.active) {
+    obstacle.timer += dt * 16.6;
+    const windowMs = obstacle.type === 'gate' ? 3200 : 1800;
+    if (obstacle.timer > windowMs) {
+      player.health -= obstacle.type === 'gate' ? 28 : 22;
+      obstacle.active = false;
+      obstacle.timer = 0;
+      obstacle.nextIn = 12000 + Math.random() * 6000;
+      document.getElementById('jump-btn').style.display = 'none';
+      document.getElementById('code-pad').style.display = 'none';
+      spawnBlood(player.x - 20, player.y - 5, 8);
+    }
+  }
+}
+
+function drawObstacle() {
+  const ox = player.x - 55;
+  if (obstacle.warning) {
+    const flashOn = Math.floor(performance.now() / 150) % 2 === 0;
+    if (flashOn) drawPixelBlock(ox, groundY - 8, 22, 8, 'rgba(255,180,0,0.6)');
+  }
+  if (obstacle.active) {
+    if (obstacle.type === 'wall') {
+      part(ox, groundY - 20, 22, 20, '#4a3a2a', '#2c2214');
+    } else {
+      part(ox, groundY - 28, 22, 28, '#3a3f45', '#22262a');
+      ctx.fillStyle = '#e0c060';
+      ctx.fillRect(Math.round(ox + 8), Math.round(groundY - 18), 6, 6);
+    }
+  }
+}
+"""
+
+GAME_JS = """// Main entry point: canvas setup, shared state, particles, bullets,
+// input wiring, HUD, game-over handling, and the main loop.
+// All other files (world/weapons/player/zombie/obstacles) are loaded
+// before this one and expose their pieces as plain global functions/objects.
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const state = {
+  running: true,
+  startTime: performance.now(),
+  lastSpawn: 0,
+  score: 0,
+};
+
+const bullets = [];
+const particles = [];
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  computeGroundY();
+  placePlayer();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- Input ----------
+let aiming = false;
+
+function pointerDown(y) { aiming = true; updateAimFromTouch(y); }
+function pointerMove(y) { if (aiming) updateAimFromTouch(y); }
+function pointerUp() { aiming = false; }
+
+canvas.addEventListener('touchstart', e => {
+  pointerDown(e.touches[0].clientY);
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  pointerMove(e.touches[0].clientY);
+  e.preventDefault();
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => pointerUp(), { passive: false });
+
+canvas.addEventListener('mousedown', e => pointerDown(e.clientY));
+canvas.addEventListener('mousemove', e => pointerMove(e.clientY));
+window.addEventListener('mouseup', pointerUp);
+
+document.getElementById('weapon-switch').addEventListener('click', () => {
+  player.weapon = player.weapon === 'pistol' ? 'shotgun' : 'pistol';
+});
+
+// ---------- Particles (blood) ----------
+function spawnBlood(x, y, count) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 1 + Math.random() * 3;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      life: 30 + Math.random() * 20,
+      size: 2 + Math.random() * 2,
+    });
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vx *= 0.94; p.vy *= 0.94;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
 }
 
 function drawParticles() {
@@ -567,6 +671,36 @@ function drawParticles() {
     ctx.fillStyle = 'rgba(160,0,0,' + Math.min(p.life / 30, 1) + ')';
     ctx.fillRect(p.x, p.y, p.size, p.size);
   });
+}
+
+// ---------- Bullets vs Zombies ----------
+function updateBullets(dt) {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.life <= 0 || b.x > canvas.width + 40 || b.y < -40 || b.y > canvas.height + 40) {
+      bullets.splice(i, 1); continue;
+    }
+    for (let j = zombies.length - 1; j >= 0; j--) {
+      const z = zombies[j];
+      if (Math.hypot(z.x - b.x, (z.y - 16) - b.y) < 18) {
+        z.hp -= b.damage;
+        z.hitFlash = 6;
+        spawnBlood(b.x, b.y, 4);
+        bullets.splice(i, 1);
+        if (z.hp <= 0) {
+          spawnBlood(z.x, z.y - 14, 14);
+          zombies.splice(j, 1);
+          state.score += 10;
+        }
+        break;
+      }
+    }
+  }
+}
+
+function drawBullets() {
+  bullets.forEach(b => drawPixelBlock(b.x - 2, b.y - 2, 5, 3, '#ffe89b'));
 }
 
 // ---------- HUD ----------
@@ -647,7 +781,13 @@ CAPACITOR_CONFIG = """{
 FILES = {
     "www/index.html": INDEX_HTML,
     "www/style.css": STYLE_CSS,
-    "www/game.js": GAME_JS,
+    "www/js/utils.js": UTILS_JS,
+    "www/js/world.js": WORLD_JS,
+    "www/js/weapons.js": WEAPONS_JS,
+    "www/js/player.js": PLAYER_JS,
+    "www/js/zombie.js": ZOMBIE_JS,
+    "www/js/obstacles.js": OBSTACLES_JS,
+    "www/js/game.js": GAME_JS,
     "package.json": PACKAGE_JSON,
     "capacitor.config.json": CAPACITOR_CONFIG,
 }

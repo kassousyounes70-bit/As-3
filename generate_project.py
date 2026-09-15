@@ -3,21 +3,9 @@ generate_project.py
 --------------------
 Generates the full web-game project (Zombie Survival, pixel-art, SIDE-VIEW).
 This script's ONLY job is to build the project's file structure on disk -
-the game logic itself now lives in separate, focused JS files under www/js/.
+the game logic itself lives in separate, focused JS files under www/js/.
 
 Run this file (python generate_project.py) inside the repo root.
-It writes:
-  - package.json
-  - capacitor.config.json
-  - www/index.html
-  - www/style.css
-  - www/js/utils.js       (shared pixel-art drawing helpers)
-  - www/js/world.js       (maps / background / parallax scrolling)
-  - www/js/weapons.js     (weapon configs + firing)
-  - www/js/player.js      (the player character)
-  - www/js/zombie.js      (zombies)
-  - www/js/obstacles.js   (wall-jump obstacle + security-code gate obstacle)
-  - www/js/game.js        (main loop, input, HUD, glue code)
 """
 
 import os
@@ -40,6 +28,7 @@ INDEX_HTML = """<!DOCTYPE html>
 
 <button id="weapon-switch">Switch Weapon</button>
 <button id="jump-btn" style="display:none;">JUMP!</button>
+<button id="escape-btn" style="display:none;">ESCAPE!</button>
 
 <div id="code-pad" style="display:none;">
   <div id="code-target"></div>
@@ -107,13 +96,26 @@ canvas {
   background: #e74c3c; color: #fff; font-weight: bold; font-size: 18px;
   z-index: 6; animation: pulse 0.6s infinite alternate;
 }
+#escape-btn {
+  position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+  padding: 20px 34px; border-radius: 50%; border: none;
+  background: #c0392b; color: #fff; font-weight: bold; font-size: 16px;
+  z-index: 8; animation: pulse 0.28s infinite alternate;
+  pointer-events: auto;
+}
 @keyframes pulse {
+  from { transform: scale(1) translateX(-50%); }
+  to { transform: scale(1.1) translateX(-50%); }
+}
+#jump-btn { animation-name: pulseJump; }
+@keyframes pulseJump {
   from { transform: scale(1); }
   to { transform: scale(1.08); }
 }
 #code-pad {
   position: fixed; bottom: 24px; left: 20px; right: 20px;
-  z-index: 6; color: #fff; text-align: center;
+  z-index: 7; color: #fff; text-align: center;
+  pointer-events: auto;
 }
 #code-target {
   font-size: 20px; font-weight: bold; margin-bottom: 8px;
@@ -122,7 +124,8 @@ canvas {
 #code-buttons { display: flex; justify-content: center; gap: 10px; }
 .code-btn {
   width: 52px; height: 52px; border-radius: 8px; border: none;
-  background: rgba(255,255,255,0.18); color: #fff; font-size: 20px; font-weight: bold;
+  background: rgba(255,255,255,0.22); color: #fff; font-size: 20px; font-weight: bold;
+  pointer-events: auto;
 }
 #gameover {
   position: fixed; inset: 0; background: rgba(0,0,0,0.88);
@@ -144,8 +147,6 @@ function drawPixelBlock(x, y, w, h, color) {
   ctx.fillRect(Math.round(x), Math.round(y), w, h);
 }
 
-// Draws a body part with a black pixel-art outline, a base fill color,
-// an optional darker shadow band, and an optional lighter highlight band.
 function part(x, y, w, h, fill, shadow, highlight) {
   ctx.fillStyle = '#050505';
   ctx.fillRect(Math.round(x - 1), Math.round(y - 1), w + 2, h + 2);
@@ -165,10 +166,13 @@ function part(x, y, w, h, fill, shadow, highlight) {
   }
 }
 
-function drawWalkingLegs(hipX, hipY, phase, colors) {
+// swingAmp controls how wide the leg-swing is: a small value reads as a
+// careful, cautious walk; a larger value reads as an aggressive shamble.
+function drawWalkingLegs(hipX, hipY, phase, colors, swingAmp) {
+  const amp = swingAmp || 0.55;
   const legLen = 14;
-  const swingA = Math.sin(phase) * 0.55;
-  const swingB = Math.sin(phase + Math.PI) * 0.55;
+  const swingA = Math.sin(phase) * amp;
+  const swingB = Math.sin(phase + Math.PI) * amp;
   [swingA, swingB].forEach(ang => {
     ctx.save();
     ctx.translate(hipX, hipY);
@@ -188,8 +192,9 @@ function shuffleArray(arr) {
 """
 
 WORLD_JS = """// World / maps - side-view parallax background.
-// The world scrolls to the RIGHT, because the player is retreating to the
-// LEFT: relative to the player, everything else drifts the opposite way.
+// The world scrolls to the RIGHT (the player retreats to the LEFT).
+// While an obstacle physically blocks the way (obstacle.active), the
+// scroll is paused - the player is stuck, not hurt, until it's resolved.
 
 let groundY = 0;
 
@@ -216,7 +221,7 @@ function drawBackground(dt) {
   ctx.arc(canvas.width * 0.82, groundY * 0.18, 28, 0, Math.PI * 2);
   ctx.fill();
 
-  world.farOffset = (world.farOffset + dt * 0.5) % 140;
+  world.farOffset = (world.farOffset + dt * 0.35) % 140;
   for (let x = world.farOffset - 140; x < canvas.width + 140; x += 140) {
     drawPixelBlock(x, groundY - 70, 55, 70, '#242434');
     drawPixelBlock(x + 65, groundY - 105, 38, 105, '#1e1e2c');
@@ -226,7 +231,7 @@ function drawBackground(dt) {
     ctx.fillRect(Math.round(x + 78), Math.round(groundY - 85), 5, 6);
   }
 
-  world.midOffset = (world.midOffset + dt * 1.3) % 220;
+  world.midOffset = (world.midOffset + dt * 0.9) % 220;
   for (let x = world.midOffset - 220; x < canvas.width + 220; x += 220) {
     drawPixelBlock(x, groundY - 18, 34, 18, '#2c2c3a');
   }
@@ -243,7 +248,7 @@ function drawBackground(dt) {
   ctx.lineTo(canvas.width, groundY);
   ctx.stroke();
 
-  world.groundOffset = (world.groundOffset + dt * 3.6) % 40;
+  world.groundOffset = (world.groundOffset + dt * 2.2) % 40;
   ctx.strokeStyle = 'rgba(255,255,255,0.09)';
   for (let x = world.groundOffset - 40; x < canvas.width + 40; x += 40) {
     ctx.beginPath();
@@ -270,7 +275,8 @@ function drawBackground(dt) {
 """
 
 WEAPONS_JS = """// Weapons - the aim direction is forward-fixed; only the vertical tilt
-// (set by touch position) changes where bullets go.
+// (set by touch position) changes where bullets go - this is also what
+// lets the player choose to aim at a zombie's head, body, or legs.
 
 const WEAPONS = {
   pistol:  { fireRate: 260, bulletSpeed: 12, damage: 34, spreadCount: 1, spreadAngle: 0 },
@@ -301,7 +307,8 @@ function fireWeapon(now) {
 }
 """
 
-PLAYER_JS = """// The player character: movement (retreat + jump), aiming and drawing.
+PLAYER_JS = """// The player character: a cautious backward walk (not a run), aiming,
+// jumping, and drawing.
 
 const player = {
   x: 0, y: 0,
@@ -309,7 +316,7 @@ const player = {
   maxHealth: 100,
   weapon: 'pistol',
   lastFire: 0,
-  aimTilt: 0,     // -1 (up) .. 1 (down)
+  aimTilt: 0,
   recoil: 0,
   walkPhase: 0,
   jumping: false,
@@ -356,15 +363,16 @@ function drawPlayer() {
   const jacketHi = player.health < 40 ? '#b96565' : '#4a7aab';
 
   if (!player.jumping) {
+    // small swing amplitude = careful, watchful backward steps, not a run
     drawWalkingLegs(hipX - 2, hipY, player.walkPhase, {
       main: '#20364d', shadow: '#15242f', boot: '#14181b', bootShadow: '#0a0d0f'
-    });
+    }, 0.3);
   } else {
     part(hipX - 9, hipY, 7, 13, '#20364d', '#15242f');
     part(hipX + 2, hipY, 7, 13, '#20364d', '#15242f');
   }
 
-  const bob = player.jumping ? 0 : Math.abs(Math.sin(player.walkPhase)) * 1.5;
+  const bob = player.jumping ? 0 : Math.abs(Math.sin(player.walkPhase)) * 1.1;
 
   part(hipX - 8, hipY - 20 - bob, 16, 20, jacket, jacketShadow, jacketHi);
 
@@ -391,24 +399,40 @@ function drawPlayer() {
 }
 """
 
-ZOMBIE_JS = """// Zombies: spawning, approach behaviour, and drawing.
+ZOMBIE_JS = """// Zombies: spawning (in random group sizes), approach behaviour, and
+// drawing - including a screaming mouth, a hand that reaches out as it
+// closes in, and a "crawling" state for zombies shot in the legs.
 
 const zombies = [];
 
-function spawnZombie() {
+function spawnZombie(xOffset) {
+  xOffset = xOffset || 0;
   const elapsedMin = (performance.now() - state.startTime) / 60000;
   const speedBonus = Math.min(elapsedMin * 0.12, 1.0);
   const hpBonus = Math.min(elapsedMin * 8, 60);
 
   zombies.push({
-    x: canvas.width + 30,
+    x: canvas.width + 30 + xOffset,
     y: groundY,
     speed: 1.1 + Math.random() * 0.4 + speedBonus,
     hp: 40 + hpBonus,
     maxHp: 40 + hpBonus,
     hitFlash: 0,
     walkPhase: Math.random() * Math.PI * 2,
+    crawling: false,
+    grabCooldown: 0,
   });
+}
+
+// Zombies now arrive in randomly sized groups instead of one-at-a-time,
+// so the pace of danger is less predictable.
+function spawnWave() {
+  const elapsedMin = (performance.now() - state.startTime) / 60000;
+  const maxExtra = Math.min(2, Math.floor(elapsedMin / 1.5));
+  const count = 1 + Math.floor(Math.random() * (maxExtra + 1));
+  for (let i = 0; i < count; i++) {
+    spawnZombie(i * 45 + Math.random() * 25);
+  }
 }
 
 function updateZombies(dt) {
@@ -418,32 +442,55 @@ function updateZombies(dt) {
     const dist = Math.abs(dx);
     if (dist > 34) {
       z.x += (dx / dist) * z.speed * dt;
-    } else {
-      player.health -= 0.35 * dt;
     }
     if (z.hitFlash > 0) z.hitFlash -= dt;
+    if (z.grabCooldown > 0) z.grabCooldown -= dt * 16.6;
   });
 }
 
 function drawZombie(z) {
-  const hipX = z.x, hipY = z.y - 15;
   const flash = z.hitFlash > 0;
   const skin = flash ? '#ffffff' : '#4d7a46';
   const skinShadow = flash ? '#dddddd' : '#2e4d2a';
   const skinHi = flash ? null : '#6a9861';
+
+  if (z.crawling) {
+    const hipX = z.x, hipY = z.y - 6;
+    const drag = Math.sin(z.walkPhase) * 3;
+    part(hipX - 9, hipY - 2, 8, 5, skin, skinShadow);
+    part(hipX + 1, hipY - 2, 8, 5, skin, skinShadow);
+    part(hipX - 8, hipY - 10, 16, 9, skin, skinShadow, skinHi);
+    part(hipX - 6 + drag, hipY - 16, 12, 8, skin, skinShadow);
+    ctx.fillStyle = '#ff2b2b';
+    ctx.fillRect(Math.round(hipX - 4 + drag), Math.round(hipY - 14), 2, 2);
+    ctx.fillRect(Math.round(hipX + drag), Math.round(hipY - 14), 2, 2);
+
+    const w = 20;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(hipX - w / 2, hipY - 24, w, 3);
+    ctx.fillStyle = '#c0392b';
+    ctx.fillRect(hipX - w / 2, hipY - 24, w * Math.max(z.hp / z.maxHp, 0), 3);
+    return;
+  }
+
+  const hipX = z.x, hipY = z.y - 15;
   const bob = Math.abs(Math.sin(z.walkPhase)) * 1.2;
 
   drawWalkingLegs(hipX + 2, hipY, z.walkPhase, {
     main: flash ? '#eeeeee' : '#3a3830',
     shadow: flash ? '#cccccc' : '#221f1a',
     boot: '#161616', bootShadow: '#0a0a0a'
-  });
+  }, 0.6);
 
-  // a loosely swinging arm reads much more like an undead gait than a static one
+  // the reaching arm straightens toward the player the closer it gets
+  const distToPlayer = Math.abs(player.x - z.x);
+  const reachT = Math.max(0, Math.min(1, (70 - distToPlayer) / 70));
+  const armAngle = 0.5 + Math.sin(z.walkPhase) * 0.15 - reachT * 0.9;
+
   ctx.save();
   ctx.translate(hipX - 6, hipY - 16 - bob);
-  ctx.rotate(0.4 + Math.sin(z.walkPhase) * 0.15);
-  part(-2, 0, 5, 12, flash ? '#eee' : '#3a5a35', flash ? '#ccc' : '#233b20');
+  ctx.rotate(armAngle);
+  part(-2, 0, 5, 12 + reachT * 4, flash ? '#eee' : '#3a5a35', flash ? '#ccc' : '#233b20');
   ctx.restore();
 
   part(hipX - 8, hipY - 20 - bob, 16, 20, skin, skinShadow, skinHi);
@@ -456,6 +503,11 @@ function drawZombie(z) {
   }
 
   part(hipX - 6, hipY - 30 - bob, 12, 10, skin, skinShadow);
+
+  // mouth flapping open/closed - reads as constant snarling/screaming
+  const mouthOpen = Math.abs(Math.sin(z.walkPhase * 2.2)) > 0.55;
+  ctx.fillStyle = '#1a0505';
+  ctx.fillRect(Math.round(hipX - 2), Math.round(hipY - 23 - bob), 4, mouthOpen ? 4 : 1);
 
   ctx.fillStyle = 'rgba(255,40,40,0.28)';
   ctx.fillRect(Math.round(hipX - 7), Math.round(hipY - 28 - bob), 7, 4);
@@ -472,9 +524,10 @@ function drawZombie(z) {
 """
 
 OBSTACLES_JS = """// Obstacles that appear behind the retreating player (off to the left,
-// where the player cannot see). Two kinds for now:
-//   - 'wall'  : tap JUMP in time
-//   - 'gate'  : a locked gate - enter the 3-digit security code in time
+// where the player cannot see): a wall to jump, or a locked gate that
+// needs a 3-digit security code. Hitting one does NOT cost health - it
+// simply blocks the retreat (the world stops scrolling) until solved,
+// while the zombies in front keep closing in. That is the real danger.
 
 const obstacle = {
   type: null,
@@ -513,6 +566,10 @@ function setupGateUI() {
     b.onclick = () => handleCodeTap(buttons[i]);
   });
   document.getElementById('code-pad').style.display = 'block';
+
+  // the canvas swallows touches over the whole screen - hand priority
+  // to the code buttons while the pad is open so taps actually register
+  canvas.style.pointerEvents = 'none';
 }
 
 function handleCodeTap(digit) {
@@ -533,6 +590,7 @@ function resolveObstacle() {
   obstacle.nextIn = 12000 + Math.random() * 6000;
   document.getElementById('jump-btn').style.display = 'none';
   document.getElementById('code-pad').style.display = 'none';
+  canvas.style.pointerEvents = 'auto';
 }
 
 document.getElementById('jump-btn').addEventListener('click', () => {
@@ -555,19 +613,9 @@ function updateObstacle(dt) {
       obstacle.timer = 0;
       beginObstacle();
     }
-  } else if (obstacle.active) {
-    obstacle.timer += dt * 16.6;
-    const windowMs = obstacle.type === 'gate' ? 3200 : 1800;
-    if (obstacle.timer > windowMs) {
-      player.health -= obstacle.type === 'gate' ? 28 : 22;
-      obstacle.active = false;
-      obstacle.timer = 0;
-      obstacle.nextIn = 12000 + Math.random() * 6000;
-      document.getElementById('jump-btn').style.display = 'none';
-      document.getElementById('code-pad').style.display = 'none';
-      spawnBlood(player.x - 20, player.y - 5, 8);
-    }
   }
+  // no automatic timeout here anymore: the retreat just stays blocked
+  // (see world.js / game.js) until the player actually solves it
 }
 
 function drawObstacle() {
@@ -589,9 +637,8 @@ function drawObstacle() {
 """
 
 GAME_JS = """// Main entry point: canvas setup, shared state, particles, bullets,
-// input wiring, HUD, game-over handling, and the main loop.
-// All other files (world/weapons/player/zombie/obstacles) are loaded
-// before this one and expose their pieces as plain global functions/objects.
+// hit-zone damage (head/body/legs), the grab-escape mechanic, input
+// wiring, HUD, game-over handling, and the main loop.
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -605,6 +652,7 @@ const state = {
 
 const bullets = [];
 const particles = [];
+let grab = null;
 
 function resize() {
   canvas.width = window.innerWidth;
@@ -642,6 +690,53 @@ document.getElementById('weapon-switch').addEventListener('click', () => {
   player.weapon = player.weapon === 'pistol' ? 'shotgun' : 'pistol';
 });
 
+// ---------- Grab / escape mechanic ----------
+document.getElementById('escape-btn').addEventListener('click', () => {
+  if (!grab) return;
+  grab.zombie.x += 90;
+  grab.zombie.hp -= 20;
+  grab.zombie.hitFlash = 8;
+  spawnBlood(grab.zombie.x, grab.zombie.y - 20, 6);
+  if (grab.zombie.hp <= 0) {
+    const idx = zombies.indexOf(grab.zombie);
+    if (idx >= 0) {
+      spawnBlood(grab.zombie.x, grab.zombie.y - 14, 14);
+      zombies.splice(idx, 1);
+      state.score += 10;
+    }
+  }
+  grab = null;
+  document.getElementById('escape-btn').style.display = 'none';
+});
+
+function updateGrab(dt) {
+  if (!grab) {
+    const candidate = zombies.find(z =>
+      !z.crawling && z.grabCooldown <= 0 && Math.abs(z.x - player.x) < 30
+    );
+    if (candidate) {
+      grab = { zombie: candidate, timer: 0, duration: 1400 };
+      document.getElementById('escape-btn').style.display = 'block';
+    }
+    return;
+  }
+
+  if (!zombies.includes(grab.zombie)) {
+    grab = null;
+    document.getElementById('escape-btn').style.display = 'none';
+    return;
+  }
+
+  grab.timer += dt * 16.6;
+  if (grab.timer > grab.duration) {
+    player.health -= 20;
+    spawnBlood(player.x, player.y - 20, 6);
+    grab.zombie.grabCooldown = 900;
+    grab = null;
+    document.getElementById('escape-btn').style.display = 'none';
+  }
+}
+
 // ---------- Particles (blood) ----------
 function spawnBlood(x, y, count) {
   for (let i = 0; i < count; i++) {
@@ -673,7 +768,7 @@ function drawParticles() {
   });
 }
 
-// ---------- Bullets vs Zombies ----------
+// ---------- Bullets vs Zombies (head / body / leg hit zones) ----------
 function updateBullets(dt) {
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
@@ -683,18 +778,35 @@ function updateBullets(dt) {
     }
     for (let j = zombies.length - 1; j >= 0; j--) {
       const z = zombies[j];
-      if (Math.hypot(z.x - b.x, (z.y - 16) - b.y) < 18) {
-        z.hp -= b.damage;
-        z.hitFlash = 6;
-        spawnBlood(b.x, b.y, 4);
-        bullets.splice(i, 1);
-        if (z.hp <= 0) {
-          spawnBlood(z.x, z.y - 14, 14);
-          zombies.splice(j, 1);
-          state.score += 10;
-        }
-        break;
+      if (z.crawling || Math.abs(z.x - b.x) >= 12) continue;
+
+      const hipY = z.y - 15;
+      let zone = null;
+      if (b.y < hipY - 18) zone = 'head';
+      else if (b.y < hipY + 2) zone = 'body';
+      else if (b.y < hipY + 16) zone = 'legs';
+      if (!zone) continue;
+
+      let dmg = b.damage;
+      if (zone === 'head') dmg *= 2.4;
+      else if (zone === 'legs') dmg *= 0.55;
+
+      z.hp -= dmg;
+      z.hitFlash = 6;
+      spawnBlood(b.x, b.y, 4);
+      bullets.splice(i, 1);
+
+      if (zone === 'legs' && z.hp > 0 && z.hp <= z.maxHp * 0.3 && !z.crawling) {
+        z.crawling = true;
+        z.speed *= 0.3;
       }
+
+      if (z.hp <= 0) {
+        spawnBlood(z.x, z.y - 14, 14);
+        zombies.splice(j, 1);
+        state.score += zone === 'head' ? 20 : 10;
+      }
+      break;
     }
   }
 }
@@ -728,23 +840,25 @@ function loop(now) {
   lastFrame = now;
 
   const elapsedMin = (now - state.startTime) / 60000;
-  const interval = Math.max(1800 - elapsedMin * 220, 450);
+  const interval = Math.max(1800 - elapsedMin * 220, 500);
   if (now - state.lastSpawn > interval) {
-    spawnZombie();
+    spawnWave();
     state.lastSpawn = now;
   }
 
   if (aiming) fireWeapon(now);
   if (player.recoil > 0) { player.recoil -= dt * 1.1; if (player.recoil < 0) player.recoil = 0; }
-  if (!player.jumping) player.walkPhase += dt * 0.22;
+  if (!player.jumping && !obstacle.active) player.walkPhase += dt * 0.11;
 
   updateJump(dt);
   updateZombies(dt);
+  updateGrab(dt);
   updateBullets(dt);
   updateParticles(dt);
   updateObstacle(dt);
 
-  drawBackground(dt);
+  // the world only scrolls while the retreat isn't physically blocked
+  drawBackground(obstacle.active ? 0 : dt);
   drawObstacle();
   drawParticles();
   zombies.forEach(drawZombie);
